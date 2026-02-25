@@ -1,0 +1,44 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0 -- /Users/shreelakshmigopinatharao/openemr/openemr-agent/venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/shreelakshmigopinatharao/openemr/openemr-agent
+plugins: anyio-4.12.1, langsmith-0.4.37
+collecting ... collected 35 items
+
+tests/test_langgraph_state.py::TestAgentStateDefaults::test_state_default_values PASSED [  2%]
+tests/test_langgraph_state.py::TestAgentStateDefaults::test_state_fields_accept_correct_types PASSED [  5%]
+tests/test_langgraph_state.py::TestAgentStateDefaults::test_iteration_count_can_reach_three PASSED [  8%]
+tests/test_langgraph_state.py::TestAgentStateDefaults::test_pending_user_input_is_bool PASSED [ 11%]
+tests/test_langgraph_extractor.py::TestExtractorNode::test_extractor_returns_updated_state PASSED [ 14%]
+tests/test_langgraph_extractor.py::TestExtractorNode::test_extractor_calls_patient_tool PASSED [ 17%]
+tests/test_langgraph_extractor.py::TestExtractorNode::test_extractor_calls_medications_tool PASSED [ 20%]
+tests/test_langgraph_extractor.py::TestExtractorNode::test_extractor_calls_interactions_tool PASSED [ 22%]
+tests/test_langgraph_extractor.py::TestExtractorNode::test_extractor_citations_are_verbatim PASSED [ 25%]
+tests/test_langgraph_auditor.py::TestAuditorRoutingPass::test_auditor_passes_valid_extractions PASSED [ 28%]
+tests/test_langgraph_auditor.py::TestAuditorRoutingReviewLoop::test_auditor_sends_back_when_missing_citations PASSED [ 31%]
+tests/test_langgraph_auditor.py::TestAuditorRoutingReviewLoop::test_auditor_sends_back_on_non_verbatim_citation PASSED [ 34%]
+tests/test_langgraph_auditor.py::TestAuditorRoutingReviewLoop::test_auditor_detects_hallucinated_fact PASSED [ 37%]
+tests/test_langgraph_auditor.py::TestAuditorRoutingReviewLoop::test_auditor_increments_iteration_count_on_sendback PASSED [ 40%]
+tests/test_langgraph_auditor.py::TestAuditorRoutingReviewLoop::test_auditor_recovery_on_second_try PASSED [ 42%]
+tests/test_langgraph_auditor.py::TestAuditorIterationCeiling::test_auditor_caps_at_three_iterations PASSED [ 45%]
+tests/test_langgraph_auditor.py::TestAuditorIterationCeiling::test_auditor_ceiling_flags_insufficient_documentation PASSED [ 48%]
+tests/test_langgraph_auditor.py::TestAuditorIterationCeiling::test_auditor_ceiling_with_forced_count_four PASSED [ 51%]
+tests/test_langgraph_auditor.py::TestAuditorAmbiguity::test_auditor_detects_ambiguous_patient_sets_clarification PASSED [ 54%]
+tests/test_langgraph_auditor.py::TestAuditorAmbiguity::test_auditor_routes_ambiguity_to_clarification_not_loop PASSED [ 57%]
+tests/test_langgraph_auditor.py::TestAuditorAmbiguity::test_auditor_clarification_question_contains_no_pii PASSED [ 60%]
+tests/test_langgraph_clarification.py::TestClarificationPause::test_clarification_sets_pending_flag PASSED [ 62%]
+tests/test_langgraph_clarification.py::TestClarificationPause::test_clarification_question_contains_no_pii PASSED [ 65%]
+tests/test_langgraph_clarification.py::TestClarificationPause::test_clarification_preserves_existing_extractions PASSED [ 68%]
+tests/test_langgraph_clarification.py::TestClarificationPause::test_clarification_preserves_iteration_count PASSED [ 71%]
+tests/test_langgraph_clarification.py::TestClarificationResume::test_resume_clears_pending_flag PASSED [ 74%]
+tests/test_langgraph_clarification.py::TestClarificationResume::test_resume_writes_response_into_state PASSED [ 77%]
+tests/test_langgraph_clarification.py::TestClarificationResume::test_resume_routes_back_to_extractor_not_auditor PASSED [ 80%]
+tests/test_langgraph_workflow.py::TestWorkflowHappyPath::test_workflow_happy_path PASSED [ 82%]
+tests/test_langgraph_workflow.py::TestWorkflowReviewLoop::test_workflow_review_loop_one_cycle PASSED [ 85%]
+tests/test_langgraph_workflow.py::TestWorkflowReviewLoop::test_workflow_caps_review_loop_at_three PASSED [ 88%]
+tests/test_langgraph_workflow.py::TestWorkflowSessionIsolation::test_workflow_state_reset_between_sessions PASSED [ 91%]
+tests/test_langgraph_workflow.py::TestWorkflowClarification::test_workflow_pauses_on_ambiguous_input PASSED [ 94%]
+tests/test_langgraph_workflow.py::TestWorkflowClarification::test_workflow_resumes_after_clarification PASSED [ 97%]
+tests/test_langgraph_workflow.py::TestWorkflowErrorHandling::test_workflow_returns_no_raw_exceptions PASSED [100%]
+
+============================== 35 passed in 0.17s ==============================

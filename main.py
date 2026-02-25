@@ -3,10 +3,11 @@ main.py
 -------
 AgentForge — Healthcare RCM AI Agent — FastAPI server
 ------------------------------------------------------
-Exposes the healthcare AI agent as a REST API. Manages conversation
-sessions in-memory, wires conversation and verification layers, and
-provides endpoints for health check, natural language queries, eval
-execution, and eval result retrieval.
+Exposes the healthcare AI agent as a REST API. Routes queries through
+the LangGraph multi-agent state machine (Extractor → Auditor →
+Clarification/Output). Manages sessions in-memory for pending_user_input
+pause/resume. Provides endpoints for health check, natural language
+queries, eval execution, and eval result retrieval.
 
 Endpoints:
     GET  /health        — Service health check
@@ -28,21 +29,21 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from conversation import create_conversation_agent, chat_with_trace
-from verification import check_allergy_conflict, calculate_confidence, should_escalate_to_human
+from langgraph_agent.workflow import run_workflow
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 from eval.run_eval import run_eval, DEFAULT_GOLDEN_DATA_PATH
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 SERVICE_NAME = "AgentForge Healthcare RCM AI Agent"
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "results")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 # ── In-memory session store ────────────────────────────────────────────────────
-# Keyed by session_id. Each value is (agent, history).
+# Keyed by session_id. Each value is the last AgentState dict returned by run_workflow.
+# Used to detect pending_user_input and pass clarification_response on resume.
 _sessions: dict = {}
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
@@ -75,23 +76,17 @@ class AskResponse(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _get_or_create_session(session_id: Optional[str]):
+def _get_session_id(session_id: Optional[str]) -> str:
     """
-    Retrieve existing session or create a new one.
+    Return existing session_id or generate a new one.
 
     Args:
         session_id: Caller-supplied session ID or None.
 
     Returns:
-        Tuple[str, agent, List]: (session_id, agent, history)
+        str: Valid session ID to use for this request.
     """
-    if session_id and session_id in _sessions:
-        agent, history = _sessions[session_id]
-        return session_id, agent, history
-    new_id = session_id or str(uuid.uuid4())
-    agent, history = create_conversation_agent()
-    _sessions[new_id] = (agent, history)
-    return new_id, agent, history
+    return session_id if session_id else str(uuid.uuid4())
 
 
 def _load_latest_results(results_dir: str) -> Optional[dict]:
@@ -153,8 +148,12 @@ def health_check() -> dict:
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest) -> AskResponse:
     """
-    Accept a natural language question, route through the agent with
-    conversation history, apply verification, and return enriched response.
+    Accept a natural language question, route through the LangGraph multi-agent
+    state machine, and return a cited, verified response.
+
+    If the session has a pending clarification (pending_user_input=True), the
+    incoming question is treated as the clarification response and the workflow
+    is resumed from the Extractor Node.
 
     Args:
         request: AskRequest with question and optional session_id.
@@ -162,32 +161,34 @@ def ask(request: AskRequest) -> AskResponse:
     Returns:
         AskResponse: answer, session_id, timestamp, escalate, confidence, disclaimer.
     """
-    session_id, agent, history = _get_or_create_session(request.session_id)
+    session_id = _get_session_id(request.session_id)
+    prior_state = _sessions.get(session_id)
 
-    answer, new_history, tool_trace = chat_with_trace(agent, history, request.question)
+    clarification_response = None
+    if prior_state and prior_state.get("pending_user_input"):
+        clarification_response = request.question
 
-    # Persist updated history back to session store.
-    _sessions[session_id] = (agent, new_history)
+    result = run_workflow(
+        query=request.question,
+        session_id=session_id,
+        clarification_response=clarification_response,
+    )
 
-    # Verification: naive confidence based on whether the response is healthy.
-    # tools_succeeded = 3 if response looks like real data, else 1.
-    tools_total = 3
-    tools_succeeded = 3 if len(answer) > 50 else 1
-    interactions_found = any(word in answer.lower() for word in ["interaction", "high severity", "contraindicated"])
-    allergy_conflict = any(word in answer.lower() for word in ["allergy conflict", "known allergy"])
+    _sessions[session_id] = result
 
-    confidence = calculate_confidence(tools_succeeded, tools_total, interactions_found, allergy_conflict)
-    escalation = should_escalate_to_human(confidence)
+    answer = result.get("final_response") or result.get("clarification_needed") or "Unable to process request."
+    confidence = result.get("confidence_score", 0.0)
+    escalate = confidence < CLINICAL_SAFETY_RULES["confidence_threshold"] or result.get("is_partial", False)
     disclaimer = CLINICAL_SAFETY_RULES["disclaimer"]
 
     return AskResponse(
         answer=answer,
         session_id=session_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
-        escalate=escalation.get("escalate", False),
+        escalate=escalate,
         confidence=confidence,
         disclaimer=disclaimer,
-        tool_trace=tool_trace,
+        tool_trace=result.get("tool_trace", []),
     )
 
 
