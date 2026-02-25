@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from conversation import create_conversation_agent, chat
@@ -38,6 +39,7 @@ VERSION = "1.0.0"
 SERVICE_NAME = "AgentForge Healthcare RCM AI Agent"
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "results")
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 # ── In-memory session store ────────────────────────────────────────────────────
 # Keyed by session_id. Each value is (agent, history).
@@ -118,6 +120,18 @@ def _load_latest_results(results_dir: str) -> Optional[dict]:
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+def root() -> HTMLResponse:
+    """
+    Serve the chat UI.
+
+    Returns:
+        HTMLResponse: The chat interface HTML page.
+    """
+    with open(os.path.join(STATIC_DIR, "index.html"), "r") as f:
+        return HTMLResponse(content=f.read())
+
 
 @app.get("/health")
 def health_check() -> dict:
