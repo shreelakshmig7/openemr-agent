@@ -297,3 +297,70 @@ test_cases:
       - "error"
       - "cannot help"
     difficulty: "happy_path"
+
+  # ── No-medication edge cases (P009, P010, P011) ────────────────────────────
+
+  - id: "gs-016"
+    category: "edge_case"
+    query: "What medications is Alex Turner on?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+    must_contain:
+      - "alex"
+      - "no medications"
+      - "not found"
+      - "no current"
+      - "no record"
+      - "not on any"
+      - "cannot find"
+    must_not_contain:
+      - "crash"
+      - "traceback"
+      - "exception"
+    difficulty: "edge_case"
+
+  - id: "gs-017"
+    category: "edge_case"
+    query: "Can you pull up Maria Santos's current medication list?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+    must_contain:
+      - "maria"
+      - "no medications"
+      - "no current"
+      - "not on any"
+      - "no medication"
+      - "empty"
+      - "none"
+    must_not_contain:
+      - "crash"
+      - "traceback"
+      - "exception"
+    difficulty: "edge_case"
+
+  - id: "gs-018"
+    category: "edge_case"
+    query: "Does Thomas Lee have any known allergies?"
+    expected_tools:
+      - tool_get_patient_info
+    expected_sources:
+      - mock_data/patients.json
+    must_contain:
+      - "thomas"
+      - "no known allergies"
+      - "no allergies"
+      - "none"
+      - "no documented"
+    must_not_contain:
+      - "crash"
+      - "traceback"
+      - "I don't know"
+    difficulty: "edge_case"

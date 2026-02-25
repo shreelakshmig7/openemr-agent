@@ -71,6 +71,33 @@
         "gender": "Female",
         "allergies": ["Aspirin", "Codeine"],
         "conditions": ["Osteoporosis", "Chronic Kidney Disease", "Hypertension"]
+      },
+      {
+        "id": "P009",
+        "name": "Alex Turner",
+        "dob": "1996-08-14",
+        "age": 28,
+        "gender": "Male",
+        "allergies": [],
+        "conditions": ["Annual Checkup"]
+      },
+      {
+        "id": "P010",
+        "name": "Maria Santos",
+        "dob": "1989-03-22",
+        "age": 35,
+        "gender": "Female",
+        "allergies": [],
+        "conditions": ["Post-Discharge Monitoring"]
+      },
+      {
+        "id": "P011",
+        "name": "Thomas Lee",
+        "dob": "1979-11-30",
+        "age": 45,
+        "gender": "Male",
+        "allergies": [],
+        "conditions": ["Preventive Care"]
       }
     ]
   }

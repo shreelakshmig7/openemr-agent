@@ -39,6 +39,7 @@
         {"name": "Alendronate", "dose": "70mg", "frequency": "once weekly", "prescribed": "2022-09-10"},
         {"name": "Lisinopril", "dose": "5mg", "frequency": "once daily", "prescribed": "2022-09-10"},
         {"name": "Calcium Carbonate", "dose": "500mg", "frequency": "twice daily", "prescribed": "2022-09-10"}
-      ]
+      ],
+      "P010": []
     }
   }

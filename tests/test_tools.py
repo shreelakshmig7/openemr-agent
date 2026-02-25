@@ -139,3 +139,37 @@ def test_check_interactions_single_drug():
     meds = [{"name": "Warfarin"}]
     result = check_drug_interactions(meds)
     assert result["interactions_found"] is False
+
+
+# ── Edge cases: patients with no medications ──────────────────────────────────
+
+def test_get_medications_no_record_returns_failure():
+    """P009 exists in patients DB but has no entry in medications DB — must return success: False gracefully."""
+    result = get_medications("P009")
+    assert result["success"] is False
+    assert result["medications"] == []
+    assert "error" in result
+    assert "P009" in result["error"]
+
+def test_get_medications_empty_list_returns_success():
+    """P010 has an entry in medications DB but with an empty list — must return success: True with empty list."""
+    result = get_medications("P010")
+    assert result["success"] is True
+    assert result["medications"] == []
+    assert result["patient_id"] == "P010"
+
+def test_get_patient_info_no_allergies():
+    """P009, P010, P011 have no allergies — allergies field must be an empty list, not None or missing."""
+    for pid in ["P009", "P010", "P011"]:
+        result = get_patient_info(pid)
+        assert result["success"] is True
+        assert isinstance(result["patient"]["allergies"], list)
+        assert len(result["patient"]["allergies"]) == 0
+
+def test_get_patient_info_no_medications_patients_exist():
+    """P009, P010, P011 must be findable by name even though they have no medications."""
+    names = ["Alex Turner", "Maria Santos", "Thomas Lee"]
+    for name in names:
+        result = get_patient_info(name)
+        assert result["success"] is True
+        assert result["patient"] is not None
