@@ -22,6 +22,7 @@ Project: AgentForge — Healthcare RCM AI Agent
 
 import json
 import os
+import re
 from langsmith import traceable
 
 # Load mock data once at startup
@@ -51,29 +52,58 @@ except (FileNotFoundError, KeyError, json.JSONDecodeError) as e:
 
 # ── Tool 1: Get Patient Info ──────────────────────────────────────────────────
 @traceable
-def get_patient_info(name: str) -> dict:
+def get_patient_info(name_or_id: str) -> dict:
     """
-    Look up a patient by name.
-    Returns patient ID, age, gender, allergies, and conditions.
+    Look up a patient by name or by patient ID (e.g. P001, P002, P003).
+    Returns patient ID, name, age, gender, allergies, and conditions.
+
+    Args:
+        name_or_id: Full or partial patient name, or a patient ID like P001.
+
+    Returns:
+        dict: {"success": bool, "patient": dict | None, "error": str | None}
+
+    Raises:
+        Never — all failures return a structured error dict.
     """
-    if not name or not name.strip():
+    try:
+        if not name_or_id or not name_or_id.strip():
+            return {
+                "success": False,
+                "error": "Name or ID cannot be empty",
+                "patient": None,
+            }
+        query = name_or_id.strip()
+
+        # ID lookup: matches P001, P002, p003 etc.
+        if re.match(r'^[Pp]\d+$', query):
+            query_upper = query.upper()
+            for patient in PATIENTS_DB:
+                if patient.get("id", "").upper() == query_upper:
+                    return {"success": True, "patient": patient}
+            return {
+                "success": False,
+                "error": f"No patient found with ID '{query}'",
+                "patient": None,
+            }
+
+        # Name lookup (original behaviour — unchanged)
+        query_lower = query.lower()
+        for patient in PATIENTS_DB:
+            if query_lower in patient["name"].lower():
+                return {"success": True, "patient": patient}
+
         return {
             "success": False,
-            "error": "Name cannot be empty",
-            "patient": None
+            "error": f"No patient found with name '{name_or_id}'",
+            "patient": None,
         }
-    name_lower = name.lower().strip()
-    for patient in PATIENTS_DB:
-        if name_lower in patient["name"].lower():
-            return {
-                "success": True,
-                "patient": patient
-            }
-    return {
-        "success": False,
-        "error": f"No patient found with name '{name}'",
-        "patient": None
-    }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Unexpected error during patient lookup: {str(e)}",
+            "patient": None,
+        }
 
 
 # ── Tool 2: Get Medications ───────────────────────────────────────────────────

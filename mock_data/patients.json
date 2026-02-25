@@ -26,6 +26,51 @@
         "gender": "Male",
         "allergies": [],
         "conditions": ["Atrial Fibrillation", "Heart Failure", "Hypertension"]
+      },
+      {
+        "id": "P004",
+        "name": "Sarah Chen",
+        "dob": "1985-04-12",
+        "age": 39,
+        "gender": "Female",
+        "allergies": ["Codeine", "Sulfa"],
+        "conditions": ["Depression", "Chronic Pain", "Hypertension"]
+      },
+      {
+        "id": "P005",
+        "name": "James Wilson",
+        "dob": "1962-09-30",
+        "age": 62,
+        "gender": "Male",
+        "allergies": ["Penicillin"],
+        "conditions": ["Type 2 Diabetes", "Hyperlipidemia", "Gout"]
+      },
+      {
+        "id": "P006",
+        "name": "Emily Rodriguez",
+        "dob": "1986-02-14",
+        "age": 38,
+        "gender": "Female",
+        "allergies": ["Penicillin"],
+        "conditions": ["Bacterial Infection", "Hypertension"]
+      },
+      {
+        "id": "P007",
+        "name": "David Kim",
+        "dob": "1969-07-05",
+        "age": 55,
+        "gender": "Male",
+        "allergies": [],
+        "conditions": ["Bipolar Disorder", "Hypertension", "Hypothyroidism"]
+      },
+      {
+        "id": "P008",
+        "name": "Patricia Moore",
+        "dob": "1954-12-20",
+        "age": 70,
+        "gender": "Female",
+        "allergies": ["Aspirin", "Codeine"],
+        "conditions": ["Osteoporosis", "Chronic Kidney Disease", "Hypertension"]
       }
     ]
   }

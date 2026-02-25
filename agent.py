@@ -37,16 +37,17 @@ os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "openemr-agent"
 # ── Wrap tools for LangChain ──────────────────────────────────────────────────
 
 @tool
-def tool_get_patient_info(name: str) -> dict:
+def tool_get_patient_info(name_or_id: str) -> dict:
     """
-    Look up a patient by their name in the healthcare system.
-    Use this when you need to find a patient's ID, age, allergies, or conditions.
+    Look up a patient by their name OR patient ID in the healthcare system.
+    Use this whenever you need a patient's full profile: name, ID, age, allergies, or conditions.
+    Always call this first — even if the user provides a patient ID directly.
     Args:
-        name: Full or partial name of the patient
+        name_or_id: Full or partial patient name (e.g. "John Smith") OR a patient ID (e.g. "P001", "P002")
     Returns:
-        Patient details including ID, age, gender, allergies, and conditions
+        Patient details including ID, name, age, gender, allergies, and conditions
     """
-    return get_patient_info(name)
+    return get_patient_info(name_or_id)
 
 
 @tool
@@ -89,11 +90,14 @@ Your responsibilities:
 5. Flag HIGH severity interactions with a clear WARNING
 6. If you are unsure, say so clearly — never guess about medical information
 
-Always follow this order when asked about a patient's medications:
-1. First call tool_get_patient_info to get the patient ID
-2. Then call tool_get_medications with that patient ID
+Always follow this order when asked about a patient:
+1. First call tool_get_patient_info with the patient's name OR ID — this gives you the full profile including name, allergies, and conditions
+2. Then call tool_get_medications with the patient ID from step 1
 3. Then call tool_check_drug_interactions with the medication names
-4. Synthesize all results into a clear, cited response
+4. Synthesize all results into a clear, cited response that always includes the patient's name
+
+If the user provides a patient ID directly (e.g. P001, P002), still call tool_get_patient_info with that ID first.
+Never call tool_get_medications without first having the full patient profile from tool_get_patient_info.
 
 Be precise, professional, and safety-focused."""
 

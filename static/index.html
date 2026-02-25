@@ -115,6 +115,73 @@
       padding: 0 4px;
     }
 
+    /* ── Tool Trace ── */
+    .trace-container {
+      margin-top: 8px;
+    }
+    .trace-container details {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .trace-container summary {
+      background: #f7fafc;
+      padding: 7px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #4a5568;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .trace-container summary::-webkit-details-marker { display: none; }
+    .trace-container summary::before {
+      content: '▶';
+      font-size: 9px;
+      transition: transform 0.15s;
+    }
+    .trace-container details[open] summary::before { transform: rotate(90deg); }
+    .trace-steps { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+    .trace-step {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .trace-step-header {
+      background: #ebf4ff;
+      padding: 5px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #1a56db;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .trace-step-body { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+    .trace-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #718096;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .trace-json {
+      background: #1a202c;
+      color: #68d391;
+      border-radius: 4px;
+      padding: 7px 10px;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 160px;
+      overflow-y: auto;
+    }
+
     /* ── Typing indicator ── */
     .typing .bubble {
       display: flex;
@@ -244,6 +311,27 @@
     if (el) el.remove();
   }
 
+  function buildTraceHtml(toolTrace) {
+    if (!toolTrace || toolTrace.length === 0) return '';
+    const steps = toolTrace.map((step, i) => `
+      <div class="trace-step">
+        <div class="trace-step-header">🔧 Step ${i + 1} — ${escHtml(step.tool)}</div>
+        <div class="trace-step-body">
+          <div class="trace-label">Input</div>
+          <div class="trace-json">${escHtml(JSON.stringify(step.input, null, 2))}</div>
+          <div class="trace-label">Output</div>
+          <div class="trace-json">${escHtml(JSON.stringify(step.output, null, 2))}</div>
+        </div>
+      </div>`).join('');
+    return `
+      <div class="trace-container">
+        <details>
+          <summary>🛠️ Tool Trace (${toolTrace.length} call${toolTrace.length > 1 ? 's' : ''})</summary>
+          <div class="trace-steps">${steps}</div>
+        </details>
+      </div>`;
+  }
+
   function appendAgentMessage(data) {
     const div = document.createElement('div');
     div.className = 'msg agent';
@@ -253,12 +341,14 @@
       : '';
 
     const confidencePct = Math.round((data.confidence || 0) * 100);
+    const traceHtml = buildTraceHtml(data.tool_trace);
 
     div.innerHTML = `
       <div class="bubble">${escHtml(data.answer)}</div>
       ${escalationHtml}
       <div class="confidence">Confidence: ${confidencePct}%</div>
       <div class="disclaimer">${escHtml(data.disclaimer || '')}</div>
+      ${traceHtml}
     `;
     chat.appendChild(div);
     scrollBottom();

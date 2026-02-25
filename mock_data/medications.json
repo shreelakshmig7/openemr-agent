@@ -14,6 +14,31 @@
         {"name": "Warfarin", "dose": "5mg", "frequency": "once daily", "prescribed": "2021-03-05"},
         {"name": "Digoxin", "dose": "0.125mg", "frequency": "once daily", "prescribed": "2021-03-05"},
         {"name": "Furosemide", "dose": "40mg", "frequency": "once daily", "prescribed": "2022-07-18"}
+      ],
+      "P004": [
+        {"name": "Sertraline", "dose": "100mg", "frequency": "once daily", "prescribed": "2023-03-15"},
+        {"name": "Tramadol", "dose": "50mg", "frequency": "as needed", "prescribed": "2024-01-10"},
+        {"name": "Lisinopril", "dose": "5mg", "frequency": "once daily", "prescribed": "2023-03-15"}
+      ],
+      "P005": [
+        {"name": "Metformin", "dose": "1000mg", "frequency": "twice daily", "prescribed": "2021-05-20"},
+        {"name": "Atorvastatin", "dose": "40mg", "frequency": "once daily", "prescribed": "2021-05-20"},
+        {"name": "Allopurinol", "dose": "300mg", "frequency": "once daily", "prescribed": "2022-02-10"},
+        {"name": "Amlodipine", "dose": "5mg", "frequency": "once daily", "prescribed": "2023-08-01"}
+      ],
+      "P006": [
+        {"name": "Amoxicillin", "dose": "500mg", "frequency": "three times daily", "prescribed": "2026-02-20"},
+        {"name": "Lisinopril", "dose": "10mg", "frequency": "once daily", "prescribed": "2024-06-15"}
+      ],
+      "P007": [
+        {"name": "Lithium", "dose": "300mg", "frequency": "three times daily", "prescribed": "2020-11-01"},
+        {"name": "Ibuprofen", "dose": "400mg", "frequency": "as needed", "prescribed": "2025-12-05"},
+        {"name": "Levothyroxine", "dose": "75mcg", "frequency": "once daily", "prescribed": "2019-04-22"}
+      ],
+      "P008": [
+        {"name": "Alendronate", "dose": "70mg", "frequency": "once weekly", "prescribed": "2022-09-10"},
+        {"name": "Lisinopril", "dose": "5mg", "frequency": "once daily", "prescribed": "2022-09-10"},
+        {"name": "Calcium Carbonate", "dose": "500mg", "frequency": "twice daily", "prescribed": "2022-09-10"}
       ]
     }
   }

@@ -28,7 +28,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from conversation import create_conversation_agent, chat
+from conversation import create_conversation_agent, chat_with_trace
 from verification import check_allergy_conflict, calculate_confidence, should_escalate_to_human
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 from eval.run_eval import run_eval, DEFAULT_GOLDEN_DATA_PATH
@@ -70,6 +70,7 @@ class AskResponse(BaseModel):
     escalate: bool
     confidence: float
     disclaimer: str
+    tool_trace: list
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -163,7 +164,7 @@ def ask(request: AskRequest) -> AskResponse:
     """
     session_id, agent, history = _get_or_create_session(request.session_id)
 
-    answer, new_history = chat(agent, history, request.question)
+    answer, new_history, tool_trace = chat_with_trace(agent, history, request.question)
 
     # Persist updated history back to session store.
     _sessions[session_id] = (agent, new_history)
@@ -186,6 +187,7 @@ def ask(request: AskRequest) -> AskResponse:
         escalate=escalation.get("escalate", False),
         confidence=confidence,
         disclaimer=disclaimer,
+        tool_trace=tool_trace,
     )
 
 

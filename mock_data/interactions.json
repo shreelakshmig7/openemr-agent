@@ -41,6 +41,34 @@
         "severity": "MEDIUM",
         "description": "Corticosteroids may reduce effectiveness of Methotrexate.",
         "recommendation": "Monitor disease activity and adjust doses as needed."
+      },
+      {
+        "drug1": "Sertraline",
+        "drug2": "Tramadol",
+        "severity": "CONTRAINDICATED",
+        "description": "Concurrent use can cause serotonin syndrome — a potentially life-threatening condition with symptoms including agitation, rapid heart rate, high blood pressure, and fever.",
+        "recommendation": "Contraindicated. Do not use together. Consult physician immediately for alternative pain management."
+      },
+      {
+        "drug1": "Lithium",
+        "drug2": "Ibuprofen",
+        "severity": "HIGH",
+        "description": "NSAIDs reduce renal clearance of Lithium, causing Lithium toxicity. Symptoms include tremor, confusion, and cardiac arrhythmias.",
+        "recommendation": "Avoid combination. Use acetaminophen for pain relief. Monitor Lithium levels closely if NSAID is unavoidable."
+      },
+      {
+        "drug1": "Atorvastatin",
+        "drug2": "Amlodipine",
+        "severity": "LOW",
+        "description": "Amlodipine may slightly increase Atorvastatin plasma levels due to CYP3A4 inhibition.",
+        "recommendation": "Generally safe. Monitor for statin side effects such as muscle pain. No dose adjustment typically required."
+      },
+      {
+        "drug1": "Calcium Carbonate",
+        "drug2": "Alendronate",
+        "severity": "LOW",
+        "description": "Calcium can reduce absorption of Alendronate if taken at the same time.",
+        "recommendation": "Separate doses by at least 30 minutes. Take Alendronate first thing in the morning before food or other medications."
       }
     ]
   }

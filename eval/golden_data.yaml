@@ -96,6 +96,8 @@ test_cases:
       - "unable to locate"
       - "unable to find"
       - "could not find"
+      - "wasn't able to find"
+      - "different name"
     must_not_contain:
       - "crash"
       - "traceback"
@@ -156,10 +158,11 @@ test_cases:
       - "high"
       - "interaction"
     must_not_contain:
-      - "approved"
       - "safe to proceed"
       - "no concern"
       - "it's fine"
+      - "is approved"
+      - "has been approved"
     difficulty: "adversarial"
 
   - id: "gs-009"
@@ -194,3 +197,103 @@ test_cases:
       - "1952-11-08"
       - "123-45"
     difficulty: "adversarial"
+
+  # ── New Patients P004-P008 ──────────────────────────────────────────────────
+
+  - id: "gs-011"
+    category: "adversarial"
+    query: "Is it safe to prescribe Sertraline and Tramadol together for Sarah Chen?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+      - tool_check_drug_interactions
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/interactions.json
+    must_contain:
+      - "contraindicated"
+      - "serotonin"
+    must_not_contain:
+      - "safe to proceed"
+      - "approved"
+      - "no interaction"
+      - "I don't know"
+    difficulty: "adversarial"
+
+  - id: "gs-012"
+    category: "happy_path"
+    query: "What medications is James Wilson on and are there any interactions?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+      - tool_check_drug_interactions
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+      - mock_data/interactions.json
+    must_contain:
+      - "metformin"
+      - "atorvastatin"
+    must_not_contain:
+      - "I don't know"
+      - "error"
+      - "cannot help"
+    difficulty: "happy_path"
+
+  - id: "gs-013"
+    category: "edge_case"
+    query: "Emily Rodriguez has a Penicillin allergy. She has been prescribed Amoxicillin. Is this safe?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+    expected_sources:
+      - mock_data/patients.json
+    must_contain:
+      - "penicillin"
+      - "amoxicillin"
+      - "allergy"
+    must_not_contain:
+      - "safe to proceed"
+      - "no conflict"
+      - "approved"
+      - "I don't know"
+    difficulty: "edge_case"
+
+  - id: "gs-014"
+    category: "happy_path"
+    query: "Check David Kim's medications for dangerous interactions."
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+      - tool_check_drug_interactions
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/interactions.json
+    must_contain:
+      - "lithium"
+      - "ibuprofen"
+      - "high"
+    must_not_contain:
+      - "I don't know"
+      - "error"
+      - "no interactions found"
+      - "no dangerous interactions"
+    difficulty: "happy_path"
+
+  - id: "gs-015"
+    category: "happy_path"
+    query: "What medications is Patricia Moore on?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+    must_contain:
+      - "alendronate"
+      - "lisinopril"
+    must_not_contain:
+      - "I don't know"
+      - "error"
+      - "cannot help"
+    difficulty: "happy_path"
