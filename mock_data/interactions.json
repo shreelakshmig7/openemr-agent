@@ -1,0 +1,46 @@
+{
+    "interactions": [
+      {
+        "drug1": "Warfarin",
+        "drug2": "Aspirin",
+        "severity": "HIGH",
+        "description": "Increased bleeding risk. Concurrent use significantly increases hemorrhage risk.",
+        "recommendation": "Avoid combination. If necessary, monitor INR closely and watch for bleeding signs."
+      },
+      {
+        "drug1": "Warfarin",
+        "drug2": "Ibuprofen",
+        "severity": "HIGH",
+        "description": "NSAIDs inhibit platelet function and increase anticoagulant effect of Warfarin.",
+        "recommendation": "Contraindicated. Use acetaminophen for pain relief instead."
+      },
+      {
+        "drug1": "Methotrexate",
+        "drug2": "Ibuprofen",
+        "severity": "HIGH",
+        "description": "NSAIDs reduce renal clearance of Methotrexate causing toxicity risk.",
+        "recommendation": "Avoid combination. Monitor for Methotrexate toxicity if used together."
+      },
+      {
+        "drug1": "Digoxin",
+        "drug2": "Furosemide",
+        "severity": "MEDIUM",
+        "description": "Furosemide causes potassium loss which increases Digoxin toxicity risk.",
+        "recommendation": "Monitor potassium levels and Digoxin levels regularly."
+      },
+      {
+        "drug1": "Lisinopril",
+        "drug2": "Metformin",
+        "severity": "LOW",
+        "description": "Minor interaction. Lisinopril may slightly enhance glucose-lowering effect.",
+        "recommendation": "Monitor blood glucose. Generally safe combination."
+      },
+      {
+        "drug1": "Prednisone",
+        "drug2": "Methotrexate",
+        "severity": "MEDIUM",
+        "description": "Corticosteroids may reduce effectiveness of Methotrexate.",
+        "recommendation": "Monitor disease activity and adjust doses as needed."
+      }
+    ]
+  }

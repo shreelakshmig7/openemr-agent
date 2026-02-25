@@ -1,0 +1,19 @@
+Conversation manager test run — TDD proof
+AgentForge — Healthcare RCM AI Agent
+=====================================
+
+tests/test_conversation.py
+-------------------------
+
+test_conversation_imports PASSED
+test_create_conversation_agent_returns_agent_and_list PASSED
+test_chat_empty_input PASSED
+test_chat_empty_input_whitespace PASSED
+test_chat_single_turn PASSED
+test_chat_multi_turn_context PASSED
+test_chat_returns_error_on_failure_no_exception PASSED
+
+==============================
+7 passed
+
+Run command: pytest tests/test_conversation.py -v --tb=short

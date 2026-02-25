@@ -1,0 +1,19 @@
+{
+    "medications": {
+      "P001": [
+        {"name": "Metformin", "dose": "500mg", "frequency": "twice daily", "prescribed": "2023-01-10"},
+        {"name": "Lisinopril", "dose": "10mg", "frequency": "once daily", "prescribed": "2023-01-10"},
+        {"name": "Atorvastatin", "dose": "20mg", "frequency": "once daily", "prescribed": "2023-06-15"}
+      ],
+      "P002": [
+        {"name": "Methotrexate", "dose": "15mg", "frequency": "once weekly", "prescribed": "2022-08-01"},
+        {"name": "Folic Acid", "dose": "1mg", "frequency": "once daily", "prescribed": "2022-08-01"},
+        {"name": "Prednisone", "dose": "5mg", "frequency": "once daily", "prescribed": "2023-11-20"}
+      ],
+      "P003": [
+        {"name": "Warfarin", "dose": "5mg", "frequency": "once daily", "prescribed": "2021-03-05"},
+        {"name": "Digoxin", "dose": "0.125mg", "frequency": "once daily", "prescribed": "2021-03-05"},
+        {"name": "Furosemide", "dose": "40mg", "frequency": "once daily", "prescribed": "2022-07-18"}
+      ]
+    }
+  }

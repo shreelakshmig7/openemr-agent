@@ -1,0 +1,31 @@
+{
+    "patients": [
+      {
+        "id": "P001",
+        "name": "John Smith",
+        "dob": "1965-03-15",
+        "age": 59,
+        "gender": "Male",
+        "allergies": ["Penicillin", "Sulfa"],
+        "conditions": ["Type 2 Diabetes", "Hypertension", "Chronic Kidney Disease"]
+      },
+      {
+        "id": "P002",
+        "name": "Mary Johnson",
+        "dob": "1978-07-22",
+        "age": 46,
+        "gender": "Female",
+        "allergies": ["Aspirin", "Ibuprofen"],
+        "conditions": ["Rheumatoid Arthritis", "Osteoporosis"]
+      },
+      {
+        "id": "P003",
+        "name": "Robert Davis",
+        "dob": "1952-11-08",
+        "age": 72,
+        "gender": "Male",
+        "allergies": [],
+        "conditions": ["Atrial Fibrillation", "Heart Failure", "Hypertension"]
+      }
+    ]
+  }

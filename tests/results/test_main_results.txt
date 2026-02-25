@@ -1,0 +1,30 @@
+API server test run — TDD proof
+AgentForge — Healthcare RCM AI Agent
+=====================================
+
+tests/test_main.py
+------------------
+
+test_health_returns_200 PASSED
+test_health_required_fields PASSED
+test_health_status_ok PASSED
+test_ask_returns_200 PASSED
+test_ask_required_fields PASSED
+test_ask_enriched_fields PASSED
+test_ask_generates_session_id PASSED
+test_ask_reuses_session PASSED
+test_ask_empty_question PASSED
+test_eval_returns_200 PASSED
+test_eval_returns_required_keys PASSED
+test_eval_results_returns_200 PASSED
+test_eval_results_no_results_message PASSED
+
+==============================
+13 passed
+
+Run command: pytest tests/test_main.py -v --tb=short
+
+Live smoke test (uvicorn main:app --port 8400):
+  GET  /health       → 200 OK, service/version/status/timestamp present
+  POST /ask          → 200 OK, full agent response + session_id + escalate + confidence + disclaimer
+  GET  /eval/results → 200 OK, latest eval results returned

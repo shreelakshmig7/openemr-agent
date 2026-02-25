@@ -1,0 +1,90 @@
+/Users/shreelakshmigopinatharao/openemr/openemr-agent/venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+============================= test session starts ==============================
+platform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0 -- /Users/shreelakshmigopinatharao/openemr/openemr-agent/venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /Users/shreelakshmigopinatharao/openemr/openemr-agent
+plugins: anyio-4.12.1, langsmith-0.4.37
+collecting ... collected 73 items
+
+tests/test_agent.py::test_agent_imports PASSED                           [  1%]
+tests/test_agent.py::test_agent_creation PASSED                          [  2%]
+tests/test_agent.py::test_agent_simple_query PASSED                      [  4%]
+tests/test_agent.py::test_agent_response_contains_medication PASSED      [  5%]
+tests/test_agent.py::test_agent_unknown_patient PASSED                   [  6%]
+tests/test_conversation.py::test_conversation_imports PASSED             [  8%]
+tests/test_conversation.py::test_create_conversation_agent_returns_agent_and_list PASSED [  9%]
+tests/test_conversation.py::test_chat_empty_input PASSED                 [ 10%]
+tests/test_conversation.py::test_chat_empty_input_whitespace PASSED      [ 12%]
+tests/test_conversation.py::test_chat_single_turn PASSED                 [ 13%]
+tests/test_conversation.py::test_chat_multi_turn_context PASSED          [ 15%]
+tests/test_conversation.py::test_chat_returns_error_on_failure_no_exception PASSED [ 16%]
+tests/test_eval.py::test_run_eval_imports PASSED                         [ 17%]
+tests/test_eval.py::test_load_test_cases_imports PASSED                  [ 19%]
+tests/test_eval.py::test_load_test_cases_returns_list PASSED             [ 20%]
+tests/test_eval.py::test_load_test_cases_required_fields PASSED          [ 21%]
+tests/test_eval.py::test_load_test_cases_invalid_path PASSED             [ 23%]
+tests/test_eval.py::test_check_must_contain_pass PASSED                  [ 24%]
+tests/test_eval.py::test_check_must_contain_fail PASSED                  [ 26%]
+tests/test_eval.py::test_check_must_not_contain_pass PASSED              [ 27%]
+tests/test_eval.py::test_check_must_not_contain_fail PASSED              [ 28%]
+tests/test_eval.py::test_check_must_contain_case_insensitive PASSED      [ 30%]
+tests/test_eval.py::test_check_must_not_contain_case_insensitive PASSED  [ 31%]
+tests/test_eval.py::test_run_eval_returns_required_keys PASSED           [ 32%]
+tests/test_eval.py::test_run_eval_pass_rate_all_pass PASSED              [ 34%]
+tests/test_eval.py::test_run_eval_pass_rate_all_fail PASSED              [ 35%]
+tests/test_eval.py::test_run_eval_per_case_results PASSED                [ 36%]
+tests/test_eval.py::test_run_eval_saves_timestamped_file PASSED          [ 38%]
+tests/test_main.py::test_health_returns_200 PASSED                       [ 39%]
+tests/test_main.py::test_health_required_fields PASSED                   [ 41%]
+tests/test_main.py::test_health_status_ok PASSED                         [ 42%]
+tests/test_main.py::test_ask_returns_200 PASSED                          [ 43%]
+tests/test_main.py::test_ask_required_fields PASSED                      [ 45%]
+tests/test_main.py::test_ask_enriched_fields PASSED                      [ 46%]
+tests/test_main.py::test_ask_generates_session_id PASSED                 [ 47%]
+tests/test_main.py::test_ask_reuses_session PASSED                       [ 49%]
+tests/test_main.py::test_ask_empty_question PASSED                       [ 50%]
+tests/test_main.py::test_eval_returns_200 PASSED                         [ 52%]
+tests/test_main.py::test_eval_returns_required_keys PASSED               [ 53%]
+tests/test_main.py::test_eval_results_returns_200 PASSED                 [ 54%]
+tests/test_main.py::test_eval_results_no_results_message PASSED          [ 56%]
+tests/test_tools.py::test_get_patient_info_found PASSED                  [ 57%]
+tests/test_tools.py::test_get_patient_info_partial_name PASSED           [ 58%]
+tests/test_tools.py::test_get_patient_info_case_insensitive PASSED       [ 60%]
+tests/test_tools.py::test_get_patient_info_not_found PASSED              [ 61%]
+tests/test_tools.py::test_get_patient_info_empty_string PASSED           [ 63%]
+tests/test_tools.py::test_get_medications_found PASSED                   [ 64%]
+tests/test_tools.py::test_get_medications_all_patients PASSED            [ 65%]
+tests/test_tools.py::test_get_medications_structure PASSED               [ 67%]
+tests/test_tools.py::test_get_medications_invalid_patient PASSED         [ 68%]
+tests/test_tools.py::test_get_medications_empty_id PASSED                [ 69%]
+tests/test_tools.py::test_check_interactions_high_severity PASSED        [ 71%]
+tests/test_tools.py::test_check_interactions_no_interactions PASSED      [ 72%]
+tests/test_tools.py::test_check_interactions_multiple_found PASSED       [ 73%]
+tests/test_tools.py::test_check_interactions_string_input PASSED         [ 75%]
+tests/test_tools.py::test_check_interactions_empty_list PASSED           [ 76%]
+tests/test_tools.py::test_check_interactions_single_drug PASSED          [ 78%]
+tests/test_verification.py::test_verification_imports PASSED             [ 79%]
+tests/test_verification.py::test_allergy_conflict_match PASSED           [ 80%]
+tests/test_verification.py::test_allergy_conflict_case_insensitive PASSED [ 82%]
+tests/test_verification.py::test_allergy_conflict_no_match PASSED        [ 83%]
+tests/test_verification.py::test_allergy_conflict_empty_allergies PASSED [ 84%]
+tests/test_verification.py::test_confidence_base_score PASSED            [ 86%]
+tests/test_verification.py::test_confidence_allergy_deduction PASSED     [ 87%]
+tests/test_verification.py::test_confidence_interaction_deduction PASSED [ 89%]
+tests/test_verification.py::test_confidence_both_deductions PASSED       [ 90%]
+tests/test_verification.py::test_confidence_clamped_zero PASSED          [ 91%]
+tests/test_verification.py::test_escalate_above_threshold PASSED         [ 93%]
+tests/test_verification.py::test_escalate_below_threshold PASSED         [ 94%]
+tests/test_verification.py::test_fda_rules_high PASSED                   [ 95%]
+tests/test_verification.py::test_fda_rules_contraindicated PASSED        [ 97%]
+tests/test_verification.py::test_fda_rules_low PASSED                    [ 98%]
+tests/test_verification.py::test_fda_rules_medium PASSED                 [100%]
+
+=============================== warnings summary ===============================
+tests/test_conversation.py: 10 warnings
+  /Users/shreelakshmigopinatharao/openemr/openemr-agent/venv/lib/python3.9/site-packages/langchain/chains/base.py:748: PydanticDeprecatedSince20: The `dict` method is deprecated; use `model_dump` instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    _dict = super().dict(**kwargs)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================= 73 passed, 10 warnings in 225.44s (0:03:45) ==================

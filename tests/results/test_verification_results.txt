@@ -1,0 +1,28 @@
+Verification layer test run — TDD proof
+AgentForge — Healthcare RCM AI Agent
+=====================================
+
+tests/test_verification.py
+--------------------------
+
+test_verification_imports PASSED
+test_allergy_conflict_match PASSED
+test_allergy_conflict_case_insensitive PASSED
+test_allergy_conflict_no_match PASSED
+test_allergy_conflict_empty_allergies PASSED
+test_confidence_base_score PASSED
+test_confidence_allergy_deduction PASSED
+test_confidence_interaction_deduction PASSED
+test_confidence_both_deductions PASSED
+test_confidence_clamped_zero PASSED
+test_escalate_above_threshold PASSED
+test_escalate_below_threshold PASSED
+test_fda_rules_high PASSED
+test_fda_rules_contraindicated PASSED
+test_fda_rules_low PASSED
+test_fda_rules_medium PASSED
+
+==============================
+16 passed
+
+Run command: pytest tests/test_verification.py -v --tb=short
