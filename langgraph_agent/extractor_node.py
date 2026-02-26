@@ -3,29 +3,151 @@ extractor_node.py
 -----------------
 AgentForge — Healthcare RCM AI Agent — LangGraph Extractor Node
 ---------------------------------------------------------------
-Implements the Extractor Node in the LangGraph state machine. Calls the
-three healthcare tools in sequence (patient → medications → interactions),
-formats results as extractions with verbatim citations, and runs the PII
-stub scrubber on all input before processing.
+Implements the Extractor Node in the LangGraph state machine. Step 0 uses
+Haiku to extract the patient identifier from the query (semantic extraction).
+Then calls the three healthcare tools in sequence and formats results with
+verbatim citations. No regex for patient extraction — LLM handles all phrasing.
 
 Key functions:
-    extractor_node: Main node function called by the LangGraph graph.
+    extractor_node: Main node function — Step 0 (Haiku) then tools.
+    _extract_patient_identifier_llm: Step 0 — Haiku returns JSON (type, value, ambiguous).
     _stub_pii_scrubber: Strips HIPAA fields from text before LLM/tool calls.
-    _extract_patient_identifier: Pulls name or ID from the query string.
     _format_extractions: Converts tool results to cited extraction dicts.
 
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
 """
 
+import json
+import logging
+import os
 import re
-from typing import List
+from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
+
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from tools import get_patient_info as tool_get_patient_info
 from tools import get_medications as tool_get_medications
 from tools import check_drug_interactions as tool_check_drug_interactions
-from healthcare_guidelines import HIPAA_RULES
 from langgraph_agent.state import AgentState
+
+
+# ── Safety check: proposed drug extraction ───────────────────────────────────
+
+_EXTRACT_DRUG_SYSTEM = """You are a clinical data extractor.
+Extract the name of the drug being proposed or asked about in this safety check query.
+Return only the drug name as a single word or phrase. No explanation, no punctuation.
+
+Examples:
+  "Can I give him penicillin?"          → Penicillin
+  "Is it safe to give Mary Aspirin?"    → Aspirin
+  "Can I administer ibuprofen?"         → Ibuprofen
+  "Is Warfarin safe for this patient?"  → Warfarin
+
+If no drug name is found, return empty string.
+"""
+
+
+def _extract_proposed_drug_llm(query: str) -> str:
+    """
+    Extract the proposed drug name from a SAFETY_CHECK query using Claude Haiku.
+
+    Args:
+        query: The user's safety check query (e.g. "Can I give him penicillin?").
+
+    Returns:
+        str: The drug name (e.g. "Penicillin"), or empty string if not found or on error.
+
+    Raises:
+        Never — returns empty string on any LLM or parse failure.
+    """
+    try:
+        llm = ChatAnthropic(
+            model="claude-haiku-4-5",
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            temperature=0,
+            max_tokens=16,
+        )
+        response = llm.invoke([
+            SystemMessage(content=_EXTRACT_DRUG_SYSTEM),
+            HumanMessage(content=query),
+        ])
+        content = response.content if hasattr(response, "content") else str(response)
+        drug = content.strip().strip(".,;:\"'").split()[0] if content.strip() else ""
+        return drug
+    except Exception as e:
+        logger.warning("Proposed drug extraction failed: %s", e)
+        return ""
+
+
+# ── Step 0: LLM patient extraction ─────────────────────────────────────────────
+
+EXTRACT_PATIENT_SYSTEM = """You are a clinical data extractor.
+Extract the patient identifier from the query.
+Return JSON only. No explanation.
+
+Rules:
+- If you find a full name (first + last), return:
+  {"type": "name", "value": "John Smith", "ambiguous": false}
+
+- If you find only a first name, return:
+  {"type": "name", "value": "John", "ambiguous": true, "reason": "first name only — multiple patients possible"}
+
+- If you find a patient ID (format P001, P002, etc.), return:
+  {"type": "id", "value": "P001", "ambiguous": false}
+
+- If you find no patient identifier (e.g. pronoun only, or empty), return:
+  {"type": "none", "ambiguous": true, "reason": "no patient name or ID found in query"}
+"""
+
+
+def _extract_patient_identifier_llm(query: str) -> Dict[str, Any]:
+    """
+    Step 0 — Haiku extracts patient identifier from natural language.
+    Returns dict with type (name|id|none), value, ambiguous (bool), reason (if ambiguous).
+
+    Args:
+        query: PII-scrubbed user query (may include "Regarding X: ..." from session).
+
+    Returns:
+        dict: {"type": str, "value": str, "ambiguous": bool, "reason": str (optional)}.
+              On LLM/parse failure, returns {"type": "none", "ambiguous": True, "reason": "extraction failed"}.
+    """
+    try:
+        llm = ChatAnthropic(
+            model="claude-haiku-4-5",
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            temperature=0,
+        )
+        response = llm.invoke([
+            SystemMessage(content=EXTRACT_PATIENT_SYSTEM),
+            HumanMessage(content=query),
+        ])
+        content = response.content if hasattr(response, "content") else str(response)
+        if not content:
+            return {"type": "none", "ambiguous": True, "reason": "no response from extractor"}
+        text = content.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        text = text.strip()
+        out = json.loads(text)
+        if not isinstance(out, dict):
+            return {"type": "none", "ambiguous": True, "reason": "invalid extraction format"}
+        out.setdefault("ambiguous", True)
+        out.setdefault("type", "none")
+        out.setdefault("value", "")
+        return out
+    except json.JSONDecodeError as e:
+        logger.warning("Extractor LLM response was not valid JSON: %s", e)
+        return {"type": "none", "ambiguous": True, "reason": "extraction parse error"}
+    except Exception as e:
+        logger.exception("Extractor patient-identifier LLM call failed: %s", e)
+        return {"type": "none", "ambiguous": True, "reason": "extraction failed"}
 
 
 # ── PII Scrubber Stub ─────────────────────────────────────────────────────────
@@ -61,41 +183,6 @@ def _stub_pii_scrubber(text: str) -> str:
         return text
     except Exception:
         return text
-
-
-# ── Patient identifier extraction ─────────────────────────────────────────────
-
-def _extract_patient_identifier(query: str) -> str:
-    """
-    Extract a patient name or ID from the query string.
-    Matches patient IDs (P001 format) or common name patterns.
-
-    Args:
-        query: Cleaned query string (PII already scrubbed).
-
-    Returns:
-        str: Patient name or ID, or empty string if none found.
-
-    Raises:
-        Never — returns empty string on any failure.
-    """
-    try:
-        id_match = re.search(r'\b[Pp]\d{3,}\b', query)
-        if id_match:
-            return id_match.group(0)
-
-        name_patterns = [
-            r'(?:for|about|is|check|lookup|look up)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
-            r'\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b',
-        ]
-        for pattern in name_patterns:
-            match = re.search(pattern, query)
-            if match:
-                return match.group(1)
-
-        return ""
-    except Exception:
-        return ""
 
 
 # ── Extraction formatter ──────────────────────────────────────────────────────
@@ -182,16 +269,23 @@ def extractor_node(state: AgentState) -> AgentState:
         if state.get("clarification_response"):
             clean_query = f"{clean_query} {_stub_pii_scrubber(state['clarification_response'])}"
 
-        patient_identifier = _extract_patient_identifier(clean_query)
+        # Step 0 — Haiku extracts patient identifier (no regex)
+        extracted = _extract_patient_identifier_llm(clean_query)
+        state["extracted_patient_identifier"] = extracted
 
+        if extracted.get("ambiguous") or extracted.get("type") == "none":
+            reason = extracted.get("reason") or "No patient identifier found."
+            state["clarification_needed"] = f"Which patient are you referring to? ({reason})"
+            state["pending_user_input"] = True
+            state["extractions"] = []
+            state["tool_trace"] = []
+            return state
+
+        patient_identifier = (extracted.get("value") or "").strip()
         if not patient_identifier:
-            state["extractions"] = [{
-                "claim": "AMBIGUOUS: No patient name or ID found in query.",
-                "citation": "",
-                "source": "",
-                "verbatim": False,
-                "ambiguous": True,
-            }]
+            state["clarification_needed"] = "Which patient are you referring to? Please provide a full name or patient ID."
+            state["pending_user_input"] = True
+            state["extractions"] = []
             state["tool_trace"] = []
             return state
 
@@ -226,10 +320,21 @@ def extractor_node(state: AgentState) -> AgentState:
 
         medications = meds_result.get("medications", []) if meds_result.get("success") else []
 
-        interactions_result = tool_check_drug_interactions(medications)
+        # For SAFETY_CHECK: extract proposed drug and include it in the interaction check
+        # so check_drug_interactions can detect conflicts with the patient's existing meds.
+        proposed_drug = ""
+        meds_for_interaction_check = medications
+        if state.get("query_intent") == "SAFETY_CHECK":
+            proposed_drug = _extract_proposed_drug_llm(clean_query)
+            state["proposed_drug"] = proposed_drug
+            if proposed_drug:
+                meds_for_interaction_check = medications + [{"name": proposed_drug}]
+                logger.info("SAFETY_CHECK: proposed drug '%s' added to interaction check", proposed_drug)
+
+        interactions_result = tool_check_drug_interactions(meds_for_interaction_check)
         tool_trace.append({
             "tool": "tool_check_drug_interactions",
-            "input": [m.get("name", m) if isinstance(m, dict) else m for m in medications],
+            "input": [m.get("name", m) if isinstance(m, dict) else m for m in meds_for_interaction_check],
             "output": interactions_result,
         })
 

@@ -9,9 +9,10 @@ shared state. Provides create_initial_state() to ensure consistent
 initialization with correct defaults.
 
 Key fields:
+    query_intent: Set by Router Node — classifies query type before Extractor runs.
     pending_user_input: Pauses entire workflow without discarding work.
     iteration_count: Enforces 3-iteration ceiling on Auditor review loop.
-    routing_decision: Set by Auditor to control conditional edge routing.
+    routing_decision: Set by Router/Auditor to control conditional edge routing.
 
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
@@ -27,6 +28,11 @@ class AgentState(TypedDict):
 
     Args:
         input_query: Original natural language query from the user.
+        query_intent: Set by Router Node — one of MEDICATIONS | ALLERGIES | INTERACTIONS |
+            SAFETY_CHECK | GENERAL_CLINICAL | OUT_OF_SCOPE. Controls Output Node filtering.
+        proposed_drug: Set by Extractor Node when query_intent is SAFETY_CHECK. The drug
+            name extracted from the query (e.g. "Penicillin" from "Can I give him penicillin?").
+            Used by Output Node to check allergy and interaction extractions for a verdict.
         documents_processed: List of source documents/sections processed.
         extractions: List of extracted claims, each with citation and source.
         audit_results: Validation results from the Auditor Node.
@@ -37,15 +43,19 @@ class AgentState(TypedDict):
         confidence_score: Confidence in the final response (0.0 to 1.0).
         final_response: The formatted response returned to the user.
         error: Structured error message if something went wrong.
-        routing_decision: Set by Auditor to control graph edge routing.
+        routing_decision: Set by Router/Auditor to control graph edge routing.
+            Values: "pass" | "missing" | "ambiguous" | "partial" | "out_of_scope"
         is_partial: True when iteration ceiling was hit and response is incomplete.
         insufficient_documentation_flags: Gaps explicitly listed when is_partial=True.
         tool_trace: Record of all tool calls made during extraction.
+        extracted_patient_identifier: Result of Step 0 (Haiku) — type, value, ambiguous, reason.
 
     Returns:
         TypedDict compatible with LangGraph StateGraph.
     """
     input_query: str
+    query_intent: str
+    proposed_drug: str
     documents_processed: List[str]
     extractions: List[dict]
     audit_results: List[dict]
@@ -60,6 +70,7 @@ class AgentState(TypedDict):
     is_partial: bool
     insufficient_documentation_flags: List[str]
     tool_trace: List[dict]
+    extracted_patient_identifier: dict
 
 
 def create_initial_state(query: str) -> AgentState:
@@ -77,6 +88,8 @@ def create_initial_state(query: str) -> AgentState:
     """
     return {
         "input_query": query,
+        "query_intent": "",
+        "proposed_drug": "",
         "documents_processed": [],
         "extractions": [],
         "audit_results": [],
@@ -91,4 +104,5 @@ def create_initial_state(query: str) -> AgentState:
         "is_partial": False,
         "insufficient_documentation_flags": [],
         "tool_trace": [],
+        "extracted_patient_identifier": {},
     }

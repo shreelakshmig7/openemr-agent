@@ -145,7 +145,7 @@ def run_eval(
     Returns:
         Dict: {total, passed, failed, pass_rate, results, timestamp}
     """
-    from agent import create_agent
+    from legacy.agent import create_agent
 
     test_cases = load_test_cases(test_cases_path)
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")

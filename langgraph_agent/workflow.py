@@ -3,11 +3,12 @@ workflow.py
 -----------
 AgentForge — Healthcare RCM AI Agent — LangGraph workflow assembler
 --------------------------------------------------------------------
-Assembles the full LangGraph state machine from the four nodes and
+Assembles the full LangGraph state machine from the five nodes and
 exposes run_workflow() as the single entry point for main.py.
 
 Graph topology:
-    START → extractor → auditor
+    START → router → (OUT_OF_SCOPE → output → END; else → extractor)
+    extractor → (if pending_user_input → clarification → END; else → auditor)
     auditor:
         "pass"                  → output → END
         "missing" (count < 3)   → extractor (review loop)
@@ -17,8 +18,9 @@ Graph topology:
 Key functions:
     run_workflow: Entry point — creates fresh state, builds graph, invokes it.
     _build_graph: Assembles and compiles the LangGraph StateGraph.
+    _route_from_router: Conditional edge — routes OUT_OF_SCOPE to output, clinical to extractor.
     _route_from_auditor: Conditional edge function reading routing_decision.
-    _output_node: Formats the final state for API response.
+    _output_node: Formats the final state for API response, filters by query_intent.
 
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
@@ -29,6 +31,7 @@ from typing import Optional
 from langgraph.graph import StateGraph, END
 
 from langgraph_agent.state import AgentState, create_initial_state
+from langgraph_agent.router_node import router_node, INTENT_OUT_OF_SCOPE
 from langgraph_agent.extractor_node import extractor_node
 from langgraph_agent.auditor_node import auditor_node
 from langgraph_agent.clarification_node import clarification_node, resume_from_clarification
@@ -37,21 +40,164 @@ from healthcare_guidelines import CLINICAL_SAFETY_RULES
 
 # ── Output Node ───────────────────────────────────────────────────────────────
 
-def _output_node(state: AgentState) -> AgentState:
+def _filter_extractions_by_intent(extractions: list, query_intent: str) -> list:
     """
-    Output Node — finalizes the state before returning to the caller.
-    Appends the disclaimer and sets confidence_score if not already set.
+    Filter the full extractions list to only what the query asked for,
+    using the query_intent set by the Router Node.
+
+    Why this exists: before intent filtering, every query returned the full
+    data dump. "Does he have any allergies?" returned medications + allergies
+    + interactions. See agent_reference.md Part 14 Hotfix 3.
 
     Args:
-        state: Final AgentState from Auditor (pass or partial).
+        extractions: Full list of extraction dicts from the Extractor Node.
+        query_intent: Intent label set by router_node (e.g. "ALLERGIES").
 
     Returns:
-        AgentState: State with disclaimer appended to final_response.
+        list: Filtered subset of extractions matching the intent.
+              Returns all extractions if intent is GENERAL_CLINICAL or unrecognized.
+
+    Raises:
+        Never — returns all extractions on any failure.
+    """
+    try:
+        if not extractions or not query_intent:
+            return extractions
+
+        if query_intent == "MEDICATIONS":
+            return [e for e in extractions if "medications" in e.get("source", "").lower()]
+
+        if query_intent == "ALLERGIES":
+            return [e for e in extractions if "patients" in e.get("source", "").lower()]
+
+        if query_intent == "INTERACTIONS":
+            return [e for e in extractions if "interactions" in e.get("source", "").lower()]
+
+        if query_intent == "SAFETY_CHECK":
+            # Include all three sources — allergy, meds, and interactions —
+            # so the Output Node has full context to build a clinical verdict.
+            return list(extractions)
+
+        # GENERAL_CLINICAL or OUT_OF_SCOPE (refusal already set) — return all
+        return extractions
+    except Exception:
+        return extractions
+
+
+def _build_safety_check_response(state: AgentState) -> AgentState:
+    """
+    Build a direct clinical verdict for SAFETY_CHECK queries.
+    Checks the proposed drug against allergy and interaction extractions,
+    leads with a verdict line, then appends supporting evidence.
+
+    Args:
+        state: AgentState with proposed_drug, extractions, and input_query set.
+
+    Returns:
+        AgentState: State with final_response set to a direct clinical verdict.
 
     Raises:
         Never — returns state unchanged on any failure.
     """
     try:
+        proposed_drug = (state.get("proposed_drug") or "").strip()
+        extractions = state.get("extractions", [])
+
+        allergy_extractions = [e for e in extractions if "patients" in e.get("source", "").lower()]
+        interaction_extractions = [e for e in extractions if "interactions" in e.get("source", "").lower()]
+        med_extractions = [e for e in extractions if "medications" in e.get("source", "").lower()]
+
+        verdict_lines = []
+
+        if proposed_drug:
+            drug_lower = proposed_drug.lower()
+
+            # Check allergy conflict
+            allergy_conflict = any(
+                drug_lower in e.get("claim", "").lower()
+                for e in allergy_extractions
+            )
+            if allergy_conflict:
+                verdict_lines.append(
+                    f"⚠️ ALLERGY CONFLICT: {proposed_drug} is listed in this patient's known allergies. "
+                    f"Do NOT administer."
+                )
+
+            # Check drug interaction involving proposed drug
+            drug_interactions = [
+                e for e in interaction_extractions
+                if drug_lower in e.get("claim", "").lower()
+            ]
+            for interaction in drug_interactions:
+                verdict_lines.append(f"⚠️ DRUG INTERACTION: {interaction.get('claim', '')}")
+
+            if not verdict_lines:
+                verdict_lines.append(
+                    f"No known allergy conflict or drug interaction found for {proposed_drug} "
+                    f"based on current records. Always verify with clinical judgment."
+                )
+        else:
+            verdict_lines.append(
+                "Safety check requested. Review the patient's allergies and current medications below."
+            )
+
+        # Append supporting evidence
+        supporting = []
+        supporting.extend(e.get("claim", "") for e in allergy_extractions if e.get("claim"))
+        supporting.extend(e.get("claim", "") for e in med_extractions if e.get("claim"))
+        supporting.extend(e.get("claim", "") for e in interaction_extractions if e.get("claim"))
+
+        citations_part = " | ".join(
+            f"Source: {e['source']}" for e in extractions if e.get("source")
+        )
+        supporting_text = " ".join(supporting)
+        evidence_block = supporting_text + (f" [{citations_part}]" if citations_part else "")
+
+        state["final_response"] = "\n\n".join(verdict_lines) + "\n\n" + evidence_block
+        return state
+    except Exception:
+        return state
+
+
+def _output_node(state: AgentState) -> AgentState:
+    """
+    Output Node — filters extractions by query_intent, finalizes final_response,
+    appends the disclaimer, and sets confidence_score default if not already set.
+
+    For OUT_OF_SCOPE queries, final_response is already set by the Router Node
+    to the standard refusal string — this node only appends the disclaimer.
+
+    For clinical queries, extractions are filtered by query_intent so the
+    response only contains what the user actually asked about.
+
+    Args:
+        state: Final AgentState from Router (out_of_scope) or Auditor (pass/partial).
+
+    Returns:
+        AgentState: State with intent-filtered final_response and disclaimer appended.
+
+    Raises:
+        Never — returns state unchanged on any failure.
+    """
+    try:
+        query_intent = state.get("query_intent", "")
+
+        if query_intent == "SAFETY_CHECK":
+            state = _build_safety_check_response(state)
+        elif query_intent and query_intent != INTENT_OUT_OF_SCOPE:
+            # For other clinical queries, filter extractions to what was asked.
+            extractions = state.get("extractions", [])
+            relevant = _filter_extractions_by_intent(extractions, query_intent)
+
+            if relevant and extractions and relevant != extractions:
+                citations_part = " | ".join(
+                    f"Source: {e['source']}" for e in relevant if e.get("source")
+                )
+                state["final_response"] = (
+                    " ".join(e["claim"] for e in relevant if e.get("claim"))
+                    + (f" [{citations_part}]" if citations_part else "")
+                )
+
         if state.get("final_response") and not state["final_response"].endswith(CLINICAL_SAFETY_RULES["disclaimer"]):
             state["final_response"] = (
                 state["final_response"]
@@ -65,7 +211,36 @@ def _output_node(state: AgentState) -> AgentState:
         return state
 
 
-# ── Conditional edge router ───────────────────────────────────────────────────
+# ── Conditional edge routers ──────────────────────────────────────────────────
+
+def _route_from_router(state: AgentState) -> str:
+    """
+    After Router Node: if query is OUT_OF_SCOPE route directly to output
+    (refusal already set in final_response); otherwise route to extractor.
+
+    Args:
+        state: Current AgentState after Router Node has run.
+
+    Returns:
+        str: "output" for out-of-scope queries, "extractor" for all clinical intents.
+
+    Raises:
+        Never — returns "extractor" as safe fallback.
+    """
+    if state.get("routing_decision") == "out_of_scope":
+        return "output"
+    return "extractor"
+
+
+def _route_from_extractor(state: AgentState) -> str:
+    """
+    After Extractor: if Step 0 set pending_user_input (ambiguous or no identifier),
+    route to clarification; otherwise to auditor.
+    """
+    if state.get("pending_user_input") and state.get("clarification_needed"):
+        return "clarification"
+    return "auditor"
+
 
 def _route_from_auditor(state: AgentState) -> str:
     """
@@ -109,13 +284,23 @@ def _build_graph():
     """
     graph = StateGraph(AgentState)
 
+    graph.add_node("router", router_node)
     graph.add_node("extractor", extractor_node)
     graph.add_node("auditor", auditor_node)
     graph.add_node("clarification", clarification_node)
     graph.add_node("output", _output_node)
 
-    graph.set_entry_point("extractor")
-    graph.add_edge("extractor", "auditor")
+    graph.set_entry_point("router")
+    graph.add_conditional_edges(
+        "router",
+        _route_from_router,
+        {"output": "output", "extractor": "extractor"},
+    )
+    graph.add_conditional_edges(
+        "extractor",
+        _route_from_extractor,
+        {"clarification": "clarification", "auditor": "auditor"},
+    )
     graph.add_conditional_edges(
         "auditor",
         _route_from_auditor,
@@ -179,6 +364,8 @@ def run_workflow(
     except Exception as e:
         return {
             "input_query": query,
+            "query_intent": "",
+            "proposed_drug": "",
             "final_response": f"An unexpected error occurred: {str(e)}",
             "confidence_score": 0.0,
             "tool_trace": [],
@@ -192,5 +379,6 @@ def run_workflow(
             "routing_decision": "error",
             "is_partial": False,
             "insufficient_documentation_flags": [],
+            "extracted_patient_identifier": {},
             "error": str(e),
         }
