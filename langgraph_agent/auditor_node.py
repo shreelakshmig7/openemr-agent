@@ -67,17 +67,21 @@ def _load_source_data(source_path: str) -> str:
 
 def _verify_citation_exists_in_source(claim: str, citation: str, source: str) -> bool:
     """
-    Check whether the citation text exists verbatim in the source file.
-    Used to detect hallucinated facts — claims whose citations cannot be
-    found in the actual source data.
+    Check whether every key term in the citation exists in the source file.
+    Splits the citation into meaningful terms and verifies each appears in
+    the source content. This handles structured JSON sources where field
+    values appear on separate lines rather than as a single concatenated string.
+
+    A "key term" is any token of 3+ characters after stripping punctuation.
+    All key terms must be present in the source — partial matches fail.
 
     Args:
         claim: The claim made by the Extractor.
-        citation: The verbatim quote the Extractor cited.
-        source: Path to the source file to check against.
+        citation: The citation text whose terms must appear in the source.
+        source: Relative path to the source file to check against.
 
     Returns:
-        bool: True if citation text appears in source, False otherwise.
+        bool: True if all key terms in citation appear in source, False otherwise.
 
     Raises:
         Never — returns False on any failure.
@@ -88,7 +92,15 @@ def _verify_citation_exists_in_source(claim: str, citation: str, source: str) ->
         source_content = _load_source_data(source)
         if not source_content:
             return False
-        return citation.lower() in source_content.lower()
+        source_lower = source_content.lower()
+        terms = [
+            t.strip("[]',\".:()").lower()
+            for t in citation.split()
+            if len(t.strip("[]',\".:()")) >= 3
+        ]
+        if not terms:
+            return False
+        return all(term in source_lower for term in terms)
     except Exception:
         return False
 

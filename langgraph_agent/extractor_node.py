@@ -120,10 +120,11 @@ def _format_extractions(patient: dict, medications: List[dict], interactions: Li
         extractions = []
 
         if patient:
-            allergies_str = ", ".join(patient.get("allergies", [])) or "none on record"
+            allergies = patient.get("allergies", [])
+            allergies_str = ", ".join(allergies) if allergies else "none on record"
             extractions.append({
                 "claim": f"{patient['name']} has known allergies: {allergies_str}.",
-                "citation": str(patient.get("allergies", [])),
+                "citation": allergies_str if allergies else "no known allergies",
                 "source": "mock_data/patients.json",
                 "verbatim": True,
             })
