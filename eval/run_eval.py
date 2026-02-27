@@ -303,6 +303,93 @@ def check_denial_risk(actual_risk: Optional[str], expected_risk: Optional[str]) 
     return (actual_risk or "").upper() == expected_risk.upper()
 
 
+# ── Terminal table formatter ──────────────────────────────────────────────────
+
+def _print_eval_table(results: list, passed: int, total: int, pass_rate: float) -> None:
+    """
+    Print a formatted ASCII table of eval results to stdout.
+
+    Columns: Status | ID | Category | Confidence | Denial Risk | Latency | Scores | Preview
+    Failed cases are grouped at the bottom for easy triage.
+
+    Args:
+        results:   List of per-case result dicts from run_eval.
+        passed:    Number of passing cases.
+        total:     Total number of cases.
+        pass_rate: Pass rate as a float 0-1.
+    """
+    col_w = [6, 8, 14, 10, 12, 8, 20, 44]
+    headers = ["Status", "ID", "Category", "Confidence", "Denial Risk", "Latency", "Scores", "Response Preview"]
+
+    def cell(text: str, width: int) -> str:
+        text = str(text)
+        return text[:width].ljust(width)
+
+    def score_str(scores: dict) -> str:
+        keys = [("must_contain","MC"), ("must_not_contain","MNC"),
+                ("confidence_max","CF"), ("escalate","ES"), ("denial_risk","DR")]
+        parts = []
+        for key, label in keys:
+            val = scores.get(key)
+            if val is True:
+                parts.append(f"{label}:✓")
+            elif val is False:
+                parts.append(f"{label}:✗")
+        return " ".join(parts) if parts else "—"
+
+    sep = "+" + "+".join("-" * (w + 2) for w in col_w) + "+"
+    header_row = "|" + "|".join(f" {cell(h, col_w[i])} " for i, h in enumerate(headers)) + "|"
+
+    print()
+    print(sep)
+    print(header_row)
+    print(sep)
+
+    # Sort: passes first, then failures
+    sorted_results = sorted(results, key=lambda r: (0 if r.get("passed") else 1, r.get("id", "")))
+
+    for r in sorted_results:
+        status  = "PASS ✅" if r.get("passed") else "FAIL ❌"
+        case_id = r.get("id", "")
+        cat     = (r.get("category") or "").replace("_", " ")
+        conf    = r.get("actual", {}).get("confidence")
+        conf_s  = f"{conf*100:.0f}%" if conf is not None else "—"
+        denial  = r.get("actual", {}).get("denial_risk_level") or "—"
+        lat     = r.get("latency_seconds")
+        lat_s   = f"{lat:.1f}s" if lat is not None else "—"
+        scores  = score_str(r.get("scores", {}))
+        preview = (r.get("response_preview") or "").replace("\n", " ")
+
+        row = "|" + "|".join(
+            f" {cell(v, col_w[i])} "
+            for i, v in enumerate([status, case_id, cat, conf_s, denial, lat_s, scores, preview])
+        ) + "|"
+        print(row)
+
+    print(sep)
+
+    bar_fill = int(pass_rate * 40)
+    bar = "█" * bar_fill + "░" * (40 - bar_fill)
+    print(f"\n  RESULT: {passed}/{total} passed   [{bar}]   {pass_rate * 100:.1f}%\n")
+
+    # Print failure detail for quick triage
+    failed = [r for r in results if not r.get("passed")]
+    if failed:
+        print("  ── Failed cases ──────────────────────────────────────────────────────")
+        for r in failed:
+            scores = r.get("scores", {})
+            reasons = []
+            if not scores.get("must_contain"):    reasons.append("must_contain")
+            if not scores.get("must_not_contain"): reasons.append("must_not_contain")
+            if not scores.get("confidence_max"):   reasons.append("confidence_max")
+            if not scores.get("escalate"):         reasons.append("escalate")
+            if not scores.get("denial_risk"):      reasons.append("denial_risk")
+            preview = (r.get("response_preview") or "")[:120].replace("\n", " ")
+            print(f"  ❌ {r.get('id','?'):10s}  failed: {', '.join(reasons) or '?'}")
+            print(f"            preview: {preview}")
+        print()
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_eval(
@@ -438,7 +525,7 @@ def run_eval(
         "timestamp": timestamp,
     }
 
-    print(f"\n===== Eval complete: {passed}/{total} passed ({pass_rate * 100:.1f}%) =====")
+    _print_eval_table(per_case_results, passed, total, pass_rate)
 
     if save_results:
         os.makedirs(results_dir, exist_ok=True)
