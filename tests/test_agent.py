@@ -1,11 +1,11 @@
 """
 test_agent.py
 -------------
-Healthcare AI Agent — Test Suite for agent.py
-----------------------------------------------
-TDD test suite for the LangChain agent.
-Tests are written BEFORE agent.py is implemented — they will fail first,
-then pass once agent.py is built correctly.
+AgentForge — Healthcare RCM AI Agent — Test Suite for legacy/agent.py
+----------------------------------------------------------------------
+TDD test suite for the original single-agent LangChain implementation.
+These tests target the legacy agent in legacy/agent.py, kept for
+historical reference alongside the current LangGraph multi-agent system.
 
 Tests cover:
     - Agent creation and initialization
@@ -23,7 +23,7 @@ Project: AgentForge — Healthcare RCM AI Agent
 import pytest
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "legacy"))
 
 
 def test_agent_imports():
@@ -55,7 +55,6 @@ def test_agent_response_contains_medication():
     response = agent.invoke({
         "input": "What medications is John Smith on?"
     })
-    # Handle both string and list output formats
     output = response["output"]
     if isinstance(output, list):
         output = " ".join([o.get("text", "") if isinstance(o, dict) else str(o) for o in output])

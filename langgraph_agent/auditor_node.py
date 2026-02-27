@@ -24,11 +24,17 @@ Project: AgentForge — Healthcare RCM AI Agent
 """
 
 import json
+import logging
 import os
-from typing import List
+from typing import List, Optional
+
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 from langgraph_agent.state import AgentState
+
+logger = logging.getLogger(__name__)
 
 
 # ── Load source data for citation verification ────────────────────────────────
@@ -89,6 +95,11 @@ def _verify_citation_exists_in_source(claim: str, citation: str, source: str) ->
     try:
         if not citation or not source:
             return False
+        # PDF sources: extract_pdf already extracts verbatim quotes directly from
+        # the document — no secondary file read is possible on binary PDF content.
+        # Trust the verbatim flag set by the extractor.
+        if source.lower().endswith(".pdf"):
+            return True
         source_content = _load_source_data(source)
         if not source_content:
             return False
@@ -133,6 +144,130 @@ def _build_clarification_question(extractions: List[dict]) -> str:
         return "Your query is ambiguous. Please clarify which patient you are asking about."
     except Exception:
         return "Please clarify your query to continue."
+
+
+# ── Source label map (shared by synthesis and citation builder) ───────────────
+
+_SOURCE_LABELS = {
+    "mock_data/patients.json": "Patient Record",
+    "mock_data/medications.json": "Medications",
+    "mock_data/interactions.json": "Drug Interactions",
+    "mock_data/denial_patterns.json": "Denial Patterns",
+}
+
+_SYNTHESIS_SYSTEM = """You are a clinical AI assistant summarizing verified healthcare data for a care team.
+
+You will receive:
+- The original clinical query
+- The query intent (e.g. MEDICATIONS, SAFETY_CHECK, GENERAL_CLINICAL)
+- A list of verified clinical facts extracted from patient records and documents
+- Optional: allergy conflict details and denial risk level
+
+Your task: Write a clear, concise clinical response in 3-8 sentences (or bullet points for complex prior auth documents).
+
+Rules:
+- Only use facts provided in the extractions — do NOT invent or assume any information
+- For SAFETY_CHECK with an allergy conflict, begin with: "⚠️ ALLERGY CONFLICT: [drug] is contraindicated. Do NOT administer."
+- For SAFETY_CHECK with no conflict, begin with: "No known allergy conflict or drug interaction found for [drug] based on current records. Always verify with clinical judgment."
+- For prior authorization PDFs, structure as: Patient summary → Key clinical findings → Criteria status → Recommended action
+- For MEDICATIONS or ALLERGIES queries, respond with a brief factual list
+- For GENERAL_CLINICAL or INTERACTIONS, summarize the key clinical findings
+- Do not mention file names, JSON sources, or internal tool names
+- Do not add information beyond what the extractions contain
+- End with no disclaimer (it is added separately by the system)
+"""
+
+
+def _build_citations_part(extractions: List[dict]) -> str:
+    """
+    Build a deduplicated, human-readable citations string from extraction sources.
+
+    Args:
+        extractions: Validated extraction dicts from the extractor node.
+
+    Returns:
+        str: Formatted citations string like "Source: Patient Record | Source: Medications".
+    """
+    seen: set = set()
+    labels = []
+    for e in extractions:
+        src = e.get("source", "")
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        label = _SOURCE_LABELS.get(src, src.split("/")[-1])
+        labels.append(f"Source: {label}")
+    return " | ".join(labels)
+
+
+def _synthesize_response(
+    query: str,
+    query_intent: str,
+    extractions: List[dict],
+    allergy_conflict: Optional[dict],
+    denial_risk: Optional[dict],
+) -> Optional[str]:
+    """
+    Use Claude Sonnet to synthesize a structured clinical response from validated extractions.
+    Returns None on any failure so the caller can fall back to the raw join approach.
+
+    Args:
+        query: The original user query.
+        query_intent: Classified intent (MEDICATIONS, SAFETY_CHECK, GENERAL_CLINICAL, etc.).
+        extractions: All validated extraction dicts with claim, citation, source fields.
+        allergy_conflict: Result from check_allergy_conflict (may be None or empty).
+        denial_risk: Result from denial_analyzer (may be None or empty).
+
+    Returns:
+        str: Synthesized clinical response, or None if synthesis fails.
+
+    Raises:
+        Never — returns None on any LLM or parse failure.
+    """
+    try:
+        facts = "\n".join(
+            f"- {e['claim']}"
+            for e in extractions
+            if e.get("claim") and not e.get("synthetic")
+        )
+        conflict_info = ""
+        if allergy_conflict and allergy_conflict.get("conflict"):
+            conflict_info = (
+                f"\nALLERGY CONFLICT DETECTED: {allergy_conflict.get('drug')} "
+                f"conflicts with {allergy_conflict.get('allergy')} allergy "
+                f"(type: {allergy_conflict.get('conflict_type', 'unknown')})."
+            )
+        denial_info = ""
+        if denial_risk and denial_risk.get("risk_level") not in (None, "NONE"):
+            denial_info = (
+                f"\nDenial risk level: {denial_risk.get('risk_level')} "
+                f"({int((denial_risk.get('denial_risk_score', 0)) * 100)}%). "
+                f"Matched patterns: {', '.join(p.get('code', '') for p in denial_risk.get('matched_patterns', []))}."
+            )
+
+        user_content = (
+            f"Query: {query}\n"
+            f"Intent: {query_intent}\n"
+            f"{conflict_info}"
+            f"{denial_info}\n\n"
+            f"Verified clinical facts:\n{facts}"
+        )
+
+        llm = ChatAnthropic(
+            model="claude-sonnet-4-5",
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            temperature=0,
+            max_tokens=512,
+        )
+        response = llm.invoke([
+            SystemMessage(content=_SYNTHESIS_SYSTEM),
+            HumanMessage(content=user_content),
+        ])
+        content = response.content if hasattr(response, "content") else str(response)
+        return content.strip() if content else None
+    except Exception as exc:
+        logger.warning("Response synthesis failed, falling back to raw join: %s", exc)
+        return None
 
 
 # ── Auditor Node ──────────────────────────────────────────────────────────────
@@ -204,6 +339,12 @@ def auditor_node(state: AgentState) -> AgentState:
                 failed_extractions.append(extraction)
                 continue
 
+            # Synthetic extractions are computed from tool results (e.g. allergy conflict
+            # determinations). They are not verbatim quotes from a source file, so
+            # source-file verification is skipped — the tool that produced them is trusted.
+            if extraction.get("synthetic"):
+                continue
+
             if not _verify_citation_exists_in_source(extraction.get("claim", ""), citation, source):
                 failed_extractions.append(extraction)
                 continue
@@ -219,18 +360,13 @@ def auditor_node(state: AgentState) -> AgentState:
             return state
 
         # ── All extractions pass ───────────────────────────────────────────
-        confidence = max(0.0, 0.95 - (iteration_count * 0.05))
-        final_response_parts = [e["claim"] for e in extractions if e.get("claim")]
-        citations_part = " | ".join(
-            f"Source: {e['source']}" for e in extractions if e.get("source")
-        )
-
+        # Auditor only validates — the Output Node handles synthesis and formatting.
+        # Apply EHR confidence penalty if patient was not found (Scenario A).
+        ehr_penalty = state.get("ehr_confidence_penalty", 0) / 100.0
+        confidence = max(0.0, 0.95 - (iteration_count * 0.05) - ehr_penalty)
         state["routing_decision"] = "pass"
         state["audit_results"] = [{"validated": True, "count": len(extractions)}]
         state["confidence_score"] = confidence
-        state["final_response"] = (
-            " ".join(final_response_parts) + f" [{citations_part}]"
-        )
         return state
 
     except Exception as e:

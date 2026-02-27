@@ -1,11 +1,11 @@
 """
 test_conversation.py
 --------------------
-AgentForge — Healthcare RCM AI Agent — Test Suite for conversation.py
-----------------------------------------------------------------------
-TDD test suite for the multi-turn conversation manager. Tests are
-written BEFORE conversation.py is implemented — they will fail first,
-then pass once conversation.py is built correctly.
+AgentForge — Healthcare RCM AI Agent — Test Suite for legacy/conversation.py
+-----------------------------------------------------------------------------
+TDD test suite for the original multi-turn conversation manager. Tests target
+the legacy implementation in legacy/conversation.py, kept for historical
+reference alongside the current LangGraph multi-agent system.
 
 Tests cover:
     - create_conversation_agent returns agent and empty history
@@ -25,7 +25,7 @@ import pytest
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "legacy"))
 
 
 def test_conversation_imports():

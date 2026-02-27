@@ -49,6 +49,8 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.3
 uuid_utils==0.14.1
+python-multipart==0.0.20
+unstructured-client==0.42.10
 uvicorn==0.39.0
 xxhash==3.6.0
 zstandard==0.25.0

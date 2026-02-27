@@ -5,8 +5,15 @@ AgentForge — Healthcare RCM AI Agent — LangGraph Extractor Node
 ---------------------------------------------------------------
 Implements the Extractor Node in the LangGraph state machine. Step 0 uses
 Haiku to extract the patient identifier from the query (semantic extraction).
-Then calls the three healthcare tools in sequence and formats results with
-verbatim citations. No regex for patient extraction — LLM handles all phrasing.
+Then calls tools in sequence and formats results with verbatim citations.
+No regex for patient extraction — LLM handles all phrasing.
+
+Tool call order:
+    1. tool_get_patient_info — resolves patient identifier to structured record.
+    2. tool_get_medications — retrieves current medication list.
+    3. tool_check_drug_interactions — checks all medications for dangerous pairs.
+    4. extract_pdf — if state.pdf_source_file is set, extracts clinical text from PDF.
+    5. analyze_denial_risk — scores all extractions against historical denial patterns.
 
 Key functions:
     extractor_node: Main node function — Step 0 (Haiku) then tools.
@@ -32,7 +39,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from tools import get_patient_info as tool_get_patient_info
 from tools import get_medications as tool_get_medications
 from tools import check_drug_interactions as tool_check_drug_interactions
+from pdf_extractor import extract_pdf as tool_extract_pdf
+from denial_analyzer import analyze_denial_risk as tool_analyze_denial_risk
+from verification import check_allergy_conflict
 from langgraph_agent.state import AgentState
+
+# Intents where denial risk analysis adds RCM value.
+# SAFETY_CHECK is excluded — allergy/interaction checks already answer that question,
+# and showing a billing denial score alongside "Do NOT administer" confuses the signal.
+_DENIAL_RISK_INTENTS = {"INTERACTIONS", "GENERAL_CLINICAL"}
 
 
 # ── Safety check: proposed drug extraction ───────────────────────────────────
@@ -214,6 +229,10 @@ def _format_extractions(patient: dict, medications: List[dict], interactions: Li
                 "citation": allergies_str if allergies else "no known allergies",
                 "source": "mock_data/patients.json",
                 "verbatim": True,
+                # When the allergy list is empty, "no known allergies" is a derived
+                # statement — not a verbatim string in the source file. Mark synthetic
+                # so the auditor skips source-file citation verification for this case.
+                "synthetic": not bool(allergies),
             })
 
         for med in medications:
@@ -299,49 +318,212 @@ def extractor_node(state: AgentState) -> AgentState:
         })
 
         if not patient_result.get("success"):
-            state["extractions"] = [{
-                "claim": f"Patient not found: {patient_result.get('error', 'Unknown error')}",
-                "citation": "",
-                "source": "",
-                "verbatim": False,
-            }]
-            state["tool_trace"] = tool_trace
-            return state
+            pdf_source_file_check = (state.get("pdf_source_file") or "").strip()
+            if not pdf_source_file_check:
+                # Scenario B — no PDF and patient not found: hard stop.
+                # Route to clarification so the user gets a clean actionable message.
+                state["clarification_needed"] = (
+                    f"Patient not found: {patient_result.get('error', 'Unknown error')}. "
+                    "Please verify the patient name or ID, or attach a clinical PDF."
+                )
+                state["pending_user_input"] = True
+                state["extractions"] = []
+                state["tool_trace"] = tool_trace
+                return state
 
-        patient = patient_result["patient"]
-        patient_id = patient["id"]
+            # Scenario A — PDF provided but patient not in EHR.
+            # Do NOT early return. Add synthetic gap extractions, apply confidence
+            # penalty, and continue to PDF extraction below.
+            logger.warning(
+                "Patient '%s' not found in EHR — proceeding from PDF only (Scenario A).",
+                patient_identifier,
+            )
+            ehr_gap_extractions = [
+                {
+                    "claim": (
+                        "Allergy status could not be verified — no EHR record found for this patient. "
+                        "Manual allergy verification required before proceeding."
+                    ),
+                    "citation": "EHR_UNAVAILABLE",
+                    "source": "EHR_UNAVAILABLE",
+                    "verbatim": True,
+                    "synthetic": True,
+                    "flag": "NO_EHR_ALLERGY_DATA",
+                },
+                {
+                    "claim": (
+                        "Medication list could not be retrieved from EHR — no patient record found. "
+                        "Drug interaction check is incomplete."
+                    ),
+                    "citation": "EHR_UNAVAILABLE",
+                    "source": "EHR_UNAVAILABLE",
+                    "verbatim": True,
+                    "synthetic": True,
+                    "flag": "NO_EHR_MEDICATION_DATA",
+                },
+            ]
+            tool_trace.append({
+                "tool": "ehr_gap_check",
+                "input": patient_identifier,
+                "output": {
+                    "patient_found": False,
+                    "pdf_fallback": True,
+                    "penalty": 45,
+                    "flags": ["NO_EHR_ALLERGY_DATA", "NO_EHR_MEDICATION_DATA"],
+                },
+            })
+            state["ehr_confidence_penalty"] = 45
+            # Continue pipeline — PDF extraction runs below.
+            # Pass sentinel values: patient=None skips EHR-based tool calls.
+            patient = None
+            patient_id = None
+        else:
+            patient = patient_result["patient"]
+            patient_id = patient["id"]
 
-        meds_result = tool_get_medications(patient_id)
-        tool_trace.append({
-            "tool": "tool_get_medications",
-            "input": patient_id,
-            "output": meds_result,
-        })
-
-        medications = meds_result.get("medications", []) if meds_result.get("success") else []
-
-        # For SAFETY_CHECK: extract proposed drug and include it in the interaction check
-        # so check_drug_interactions can detect conflicts with the patient's existing meds.
+        # ── EHR tool suite — only runs when patient was found in the database ────
+        medications: List[dict] = []
+        found_interactions: List[dict] = []
         proposed_drug = ""
-        meds_for_interaction_check = medications
-        if state.get("query_intent") == "SAFETY_CHECK":
-            proposed_drug = _extract_proposed_drug_llm(clean_query)
-            state["proposed_drug"] = proposed_drug
-            if proposed_drug:
-                meds_for_interaction_check = medications + [{"name": proposed_drug}]
-                logger.info("SAFETY_CHECK: proposed drug '%s' added to interaction check", proposed_drug)
+        allergy_conflict_result: dict = {}
 
-        interactions_result = tool_check_drug_interactions(meds_for_interaction_check)
-        tool_trace.append({
-            "tool": "tool_check_drug_interactions",
-            "input": [m.get("name", m) if isinstance(m, dict) else m for m in meds_for_interaction_check],
-            "output": interactions_result,
-        })
+        if patient is not None:
+            meds_result = tool_get_medications(patient_id)
+            tool_trace.append({
+                "tool": "tool_get_medications",
+                "input": patient_id,
+                "output": meds_result,
+            })
+            medications = meds_result.get("medications", []) if meds_result.get("success") else []
 
-        found_interactions = interactions_result.get("interactions", []) if interactions_result.get("success") else []
+            # For SAFETY_CHECK: extract proposed drug, check allergy conflict (name + class),
+            # and include it in the interaction check for drug-drug conflict detection.
+            meds_for_interaction_check = medications
+            if state.get("query_intent") == "SAFETY_CHECK":
+                proposed_drug = _extract_proposed_drug_llm(clean_query)
+                state["proposed_drug"] = proposed_drug
+                if proposed_drug:
+                    meds_for_interaction_check = medications + [{"name": proposed_drug}]
+                    logger.info("SAFETY_CHECK: proposed drug '%s' added to interaction check", proposed_drug)
 
-        state["extractions"] = _format_extractions(patient, medications, found_interactions)
-        state["documents_processed"] = ["mock_data/patients.json", "mock_data/medications.json", "mock_data/interactions.json"]
+                    allergy_conflict_result = check_allergy_conflict(
+                        proposed_drug,
+                        patient.get("allergies", []),
+                    )
+                    state["allergy_conflict_result"] = allergy_conflict_result
+                    tool_trace.append({
+                        "tool": "check_allergy_conflict",
+                        "input": {
+                            "drug": proposed_drug,
+                            "allergies": patient.get("allergies", []),
+                        },
+                        "output": allergy_conflict_result,
+                    })
+
+            interactions_result = tool_check_drug_interactions(meds_for_interaction_check)
+            tool_trace.append({
+                "tool": "tool_check_drug_interactions",
+                "input": [m.get("name", m) if isinstance(m, dict) else m for m in meds_for_interaction_check],
+                "output": interactions_result,
+            })
+            found_interactions = interactions_result.get("interactions", []) if interactions_result.get("success") else []
+
+        all_extractions = _format_extractions(patient, medications, found_interactions)
+
+        # Scenario A: patient not in EHR but PDF is attached — prepend EHR gap flags.
+        if patient is None:
+            all_extractions = ehr_gap_extractions + all_extractions
+
+        # If a drug-class or exact allergy conflict was found, inject an explicit extraction
+        # so the denial_analyzer keyword match ("allergy conflict") fires correctly.
+        if allergy_conflict_result.get("conflict"):
+            conflict_drug = allergy_conflict_result.get("drug", proposed_drug)
+            conflict_allergy = allergy_conflict_result.get("allergy", "documented allergy")
+            conflict_type = allergy_conflict_result.get("conflict_type", "allergy_conflict")
+            all_extractions.append({
+                "claim": (
+                    f"ALLERGY CONFLICT DETECTED: {conflict_drug} is contraindicated — "
+                    f"patient has a documented {conflict_allergy} allergy "
+                    f"({conflict_type.replace('_', ' ')})."
+                ),
+                "citation": f"allergy conflict: {conflict_drug} contraindicated — {conflict_allergy} allergy",
+                "source": "mock_data/patients.json",
+                "verbatim": True,
+                "synthetic": True,
+            })
+            logger.warning(
+                "ALLERGY CONFLICT: %s vs %s (%s)",
+                conflict_drug,
+                conflict_allergy,
+                conflict_type,
+            )
+        documents_processed = [
+            "mock_data/patients.json",
+            "mock_data/medications.json",
+            "mock_data/interactions.json",
+        ]
+
+        # Step 4 — PDF extraction (runs only when a source file is provided)
+        pdf_source_file = (state.get("pdf_source_file") or "").strip()
+        if pdf_source_file:
+            pdf_result = tool_extract_pdf(pdf_source_file)
+            tool_trace.append({
+                "tool": "tool_extract_pdf",
+                "input": pdf_source_file,
+                "output": {
+                    "success": pdf_result.get("success"),
+                    "element_count": pdf_result.get("element_count", 0),
+                    "source_file": pdf_result.get("source_file"),
+                    "error": pdf_result.get("error"),
+                },
+            })
+            if pdf_result.get("success"):
+                for pdf_ext in pdf_result.get("extractions", []):
+                    all_extractions.append({
+                        "claim": pdf_ext.get("verbatim_quote", ""),
+                        "citation": pdf_ext.get("verbatim_quote", ""),
+                        "source": pdf_ext.get("source_file", pdf_source_file),
+                        "verbatim": True,
+                        "page_number": pdf_ext.get("page_number"),
+                        "element_type": pdf_ext.get("element_type"),
+                    })
+                documents_processed.append(pdf_source_file)
+            else:
+                logger.warning(
+                    "PDF extraction failed for '%s': %s",
+                    pdf_source_file,
+                    pdf_result.get("error"),
+                )
+
+        # Step 5 — Denial risk analysis.
+        # Only runs for clinically meaningful intents or when a PDF is attached.
+        # Skipping for simple list queries (MEDICATIONS, ALLERGIES) avoids false positives.
+        query_intent = state.get("query_intent", "")
+        run_denial_analysis = query_intent in _DENIAL_RISK_INTENTS or bool(pdf_source_file)
+        denial_result: dict = {
+            "success": True,
+            "risk_level": "NONE",
+            "matched_patterns": [],
+            "recommendations": [],
+            "denial_risk_score": 0.0,
+            "source": "mock_data/denial_patterns.json",
+            "error": None,
+        }
+        if run_denial_analysis:
+            denial_result = tool_analyze_denial_risk(all_extractions)
+            tool_trace.append({
+                "tool": "tool_analyze_denial_risk",
+                "input": {"extraction_count": len(all_extractions)},
+                "output": {
+                    "risk_level": denial_result.get("risk_level"),
+                    "denial_risk_score": denial_result.get("denial_risk_score"),
+                    "matched_pattern_count": len(denial_result.get("matched_patterns", [])),
+                },
+            })
+
+        state["extractions"] = all_extractions
+        state["documents_processed"] = documents_processed
+        state["denial_risk"] = denial_result
         state["tool_trace"] = tool_trace
         return state
 

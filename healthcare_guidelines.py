@@ -38,6 +38,31 @@ ICD10_RULES = {
     "validation_pattern": r"^[A-Z]\d{2}(\.\d{2,4})?$",
 }
 
+# Drug class / family map — used to catch cross-class allergy conflicts.
+# Key: allergy name (lowercase). Value: list of drug names in that class (lowercase).
+# Example: a patient allergic to "penicillin" should also be flagged for amoxicillin,
+# ampicillin, etc., because they share the beta-lactam core structure.
+DRUG_CLASS_ALLERGY_MAP: dict = {
+    "penicillin": [
+        "amoxicillin", "ampicillin", "oxacillin", "dicloxacillin",
+        "nafcillin", "piperacillin", "ticarcillin", "amoxicillin-clavulanate",
+        "ampicillin-sulbactam", "piperacillin-tazobactam",
+    ],
+    "sulfa": [
+        "sulfamethoxazole", "trimethoprim-sulfamethoxazole", "bactrim",
+        "septra", "sulfadiazine", "sulfasalazine",
+    ],
+    "cephalosporin": [
+        "cephalexin", "cefazolin", "cefdinir", "ceftriaxone", "cefuroxime",
+        "cefepime", "ceftazidime", "cefpodoxime",
+    ],
+    "nsaid": [
+        "ibuprofen", "naproxen", "aspirin", "celecoxib", "indomethacin",
+        "ketorolac", "diclofenac", "meloxicam", "piroxicam",
+    ],
+    "latex": [],
+}
+
 # Clinical safety thresholds and rules
 CLINICAL_SAFETY_RULES = {
     "confidence_threshold": 0.90,

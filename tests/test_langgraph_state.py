@@ -31,6 +31,7 @@ class TestAgentStateDefaults:
         assert state["is_partial"] is False
         assert state["insufficient_documentation_flags"] == []
         assert state["tool_trace"] == []
+        assert state["extracted_patient_identifier"] == {}
 
     def test_state_fields_accept_correct_types(self):
         """State fields accept and store the correct Python types."""

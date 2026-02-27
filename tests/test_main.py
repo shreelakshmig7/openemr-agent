@@ -61,6 +61,30 @@ def _mock_run_eval(*args, **kwargs):
     }
 
 
+def _make_mock_run_workflow(captured_queries):
+    """Factory: mock run_workflow appends each call's query to captured_queries and returns state with tool_trace."""
+
+    state_with_trace = {
+        "final_response": "John Smith has known allergies: Penicillin, Sulfa.",
+        "confidence_score": 0.95,
+        "tool_trace": [
+            {"tool": "tool_get_patient_info", "input": "John Smith"},
+            {"tool": "tool_get_medications", "input": "P001"},
+        ],
+        "extracted_patient_identifier": {"type": "name", "value": "John Smith", "ambiguous": False},
+        "pending_user_input": False,
+        "clarification_needed": "",
+        "extractions": [],
+        "error": None,
+    }
+
+    def _mock(query, session_id=None, clarification_response=None):
+        captured_queries.append(query)
+        return state_with_trace
+
+    return _mock
+
+
 # ── GET /health ────────────────────────────────────────────────────────────────
 
 def test_health_returns_200():
@@ -157,6 +181,24 @@ def test_ask_reuses_session():
         session_id = r1["session_id"]
         r2 = client.post("/ask", json={"question": "Follow up", "session_id": session_id}).json()
         assert r2["session_id"] == session_id
+
+
+def test_ask_follow_up_prepends_session_patient_context():
+    """Follow-up question without patient ID (e.g. 'Does he have any allergies?') gets prior patient prepended."""
+    captured = []
+    with patch("main.run_workflow", side_effect=_make_mock_run_workflow(captured)):
+        from fastapi.testclient import TestClient
+        from main import app
+        client = TestClient(app)
+        r1 = client.post("/ask", json={"question": "What medications is John Smith on?"}).json()
+        assert r1["session_id"]
+        r2 = client.post("/ask", json={
+            "question": "Does he have any allergies?",
+            "session_id": r1["session_id"],
+        }).json()
+        assert len(captured) == 2
+        assert "Regarding John Smith" in captured[1], "Second request should prepend prior patient for follow-up"
+        assert "allergies" in captured[1].lower()
 
 
 def test_ask_empty_question():

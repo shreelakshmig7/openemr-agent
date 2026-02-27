@@ -23,6 +23,7 @@ from langsmith import traceable
 from healthcare_guidelines import (
     FDA_RULES,
     CLINICAL_SAFETY_RULES,
+    DRUG_CLASS_ALLERGY_MAP,
 )
 
 @traceable
@@ -35,14 +36,17 @@ def check_allergy_conflict(drug: str, allergies: List[str]) -> dict:
         allergies: List of known allergy strings.
 
     Returns:
-        dict: {"conflict": bool, "drug": str, "severity": str|None, "source_citation": str}.
-              conflict=True and severity="HIGH" when match found.
+        dict: {"conflict": bool, "drug": str, "allergy": str|None, "conflict_type": str|None,
+               "severity": str|None, "source_citation": str}.
+              conflict=True and severity="HIGH" when exact or class-level match found.
     """
     try:
         if not drug or not isinstance(drug, str):
             return {
                 "conflict": False,
                 "drug": str(drug) if drug else "",
+                "allergy": None,
+                "conflict_type": None,
                 "severity": None,
                 "source_citation": "Allergy check: no drug provided.",
             }
@@ -51,20 +55,52 @@ def check_allergy_conflict(drug: str, allergies: List[str]) -> dict:
             return {
                 "conflict": False,
                 "drug": drug,
+                "allergy": None,
+                "conflict_type": None,
                 "severity": None,
                 "source_citation": "Allergy check: no allergies on record.",
             }
+
+        # Pass 1 — exact name match (case-insensitive)
         for allergy in allergies:
             if allergy and isinstance(allergy, str) and allergy.strip().lower() == drug_lower:
                 return {
                     "conflict": True,
                     "drug": drug,
+                    "allergy": allergy,
+                    "conflict_type": "exact_name",
                     "severity": "HIGH",
-                    "source_citation": f"Allergy conflict: {drug} matches known allergy. Source: Patient allergy record.",
+                    "source_citation": (
+                        f"Allergy conflict: {drug} matches known allergy '{allergy}'. "
+                        "Source: Patient allergy record."
+                    ),
                 }
+
+        # Pass 2 — drug class match (e.g. Amoxicillin → penicillin class)
+        for allergy in allergies:
+            if not allergy or not isinstance(allergy, str):
+                continue
+            allergy_lower = allergy.strip().lower()
+            class_drugs = DRUG_CLASS_ALLERGY_MAP.get(allergy_lower, [])
+            if drug_lower in class_drugs:
+                return {
+                    "conflict": True,
+                    "drug": drug,
+                    "allergy": allergy,
+                    "conflict_type": "drug_class",
+                    "severity": "HIGH",
+                    "source_citation": (
+                        f"Allergy conflict: {drug} belongs to the {allergy} drug class. "
+                        f"Patient has documented {allergy} allergy. "
+                        "Source: Patient allergy record + drug class guidelines."
+                    ),
+                }
+
         return {
             "conflict": False,
             "drug": drug,
+            "allergy": None,
+            "conflict_type": None,
             "severity": None,
             "source_citation": "Allergy check: no conflict found. Source: Patient allergy record.",
         }

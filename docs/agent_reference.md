@@ -157,12 +157,32 @@ Implement in this sequence. Do not skip ahead. Each step must be working before 
 
 ### 2.2 Memory System & State Persistence
 
-To satisfy the requirement for multi-turn reasoning and clinical continuity:
+To satisfy the requirement for multi-turn reasoning and clinical continuity, the agent relies on three concepts: state persistence, conversation history, and context management.
 
-* **Conversation History:** The `messages` key in the graph state tracks dialogue history. This allows the agent to resolve pronouns (e.g., "What are HIS medications?") to the previously identified patient.
-* **State Persistence:** Implemented via `SqliteSaver` checkpointer. Every node transition (Router -> Extractor -> Auditor) is saved to a local `agent_checkpoints.sqlite` database.
-* **Context Management:** The agent maintains a `clinical_context` object in the state (Patient ID, Policy IDs), ensuring the agent doesn't re-run expensive tools for every follow-up message.
-* **Resumption:** If the agent pauses at the `Clarification Node`, the state is persisted. When a human provides the missing detail (e.g., "Left knee"), the agent resumes from the exact point of pause.
+#### 1. State Persistence (The "Hard Drive")
+
+* **What it is:** The ability to save the current progress of a "thread" to a database so it survives a crash, a timeout, or a pause.
+* **How it works:** In LangGraph, you use a Checkpointer (e.g. `SqliteSaver`). After every node (Router → Extractor → Auditor), the graph's entire state—including variables like `patient_id` or `verified_claims`—is written to a local SQLite file (e.g. `agent_checkpoints.sqlite`).
+* **Why you need it:** If the agent reaches the Clarification Node because it's confused about a patient's left vs. right knee, the state is saved. When the human finally replies 10 minutes later, the agent resumes from that exact spot rather than re-running the expensive PDF extraction.
+
+#### 2. Conversation History (The "Recent Memory")
+
+* **What it is:** The list of back-and-forth messages between the user and the agent within a single `thread_id`.
+* **How it works:** You store an array of `BaseMessage` objects (`HumanMessage`, `AIMessage`). When the user sends a new query, the agent looks at the previous messages to understand context. In the graph state this is tracked via the `messages` key.
+* **The "Pronoun" test:**
+  * User: "Look up John Smith."
+  * User: "What are his meds?"
+  If the history is working, the agent knows "his" refers to the `patient_id` retrieved in the first turn.
+
+#### 3. Context Management (The "Work Desk")
+
+* **What it is:** Deciding what information is currently "active" and relevant to the LLM's reasoning.
+* **How it works:** You don't dump hundreds of messages into the LLM (that's expensive and confusing). You manage the context by:
+  * **Summarizing:** Condensing old parts of the chat.
+  * **Trimming:** Only keeping the last 5–10 messages.
+  * **Injecting data:** Automatically pulling in the patient's "Allergy List" into every turn once the patient is identified, so the agent is always aware of safety risks.
+
+The agent maintains a `clinical_context` object in the state (Patient ID, Policy IDs) so it doesn't re-run expensive tools for every follow-up message.
 
 ### Step 1 — Project Scaffold
 

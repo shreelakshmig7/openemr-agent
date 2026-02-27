@@ -1,0 +1,68 @@
+{
+  "denial_patterns": [
+    {
+      "id": "DP001",
+      "code": "PRIOR_AUTH_MISSING",
+      "description": "Procedure requires prior authorization but none documented",
+      "keywords": ["surgery", "mri", "ct scan", "procedure", "operation", "imaging", "prior auth", "authorization"],
+      "risk_level": "HIGH",
+      "recommendation": "Obtain prior authorization from payer before scheduling procedure."
+    },
+    {
+      "id": "DP002",
+      "code": "DIAGNOSIS_MISMATCH",
+      "description": "Diagnosis codes do not clinically support the requested procedure",
+      "keywords": ["diagnosis", "icd-10", "indication", "not medically indicated", "diagnosis mismatch"],
+      "risk_level": "HIGH",
+      "recommendation": "Ensure ICD-10 codes directly support medical necessity of the procedure."
+    },
+    {
+      "id": "DP003",
+      "code": "MEDICAL_NECESSITY_UNESTABLISHED",
+      "description": "Clinical documentation does not establish medical necessity",
+      "keywords": ["elective", "cosmetic", "convenience", "not medically necessary", "optional procedure"],
+      "risk_level": "HIGH",
+      "recommendation": "Document clinical necessity with supporting evidence from patient chart."
+    },
+    {
+      "id": "DP004",
+      "code": "INCOMPLETE_DOCUMENTATION",
+      "description": "Required clinical documentation fields are missing or incomplete",
+      "keywords": ["missing", "incomplete", "not documented", "no record", "gap", "insufficient documentation"],
+      "risk_level": "MEDIUM",
+      "recommendation": "Complete all required documentation fields before claim submission."
+    },
+    {
+      "id": "DP005",
+      "code": "ALLERGY_CONTRAINDICATION",
+      "description": "Prescribed medication conflicts with documented patient allergy",
+      "keywords": ["allergy", "allergic", "contraindicated", "allergy conflict", "known allergy"],
+      "risk_level": "CRITICAL",
+      "recommendation": "Resolve allergy conflict before prescribing. Document clinical rationale if override is medically justified."
+    },
+    {
+      "id": "DP006",
+      "code": "DRUG_INTERACTION_HIGH",
+      "description": "HIGH or CONTRAINDICATED drug interaction detected in current medications",
+      "keywords": ["interaction", "contraindicated", "high severity", "serotonin", "bleeding risk", "toxicity", "severity high", "severity contraindicated"],
+      "risk_level": "HIGH",
+      "recommendation": "Review medication combination with prescribing physician. Document clinical justification before claim submission."
+    },
+    {
+      "id": "DP007",
+      "code": "NON_COVERED_SERVICE",
+      "description": "Service or medication may not be covered under the patient's plan",
+      "keywords": ["experimental", "investigational", "off-label", "not covered", "excluded service"],
+      "risk_level": "MEDIUM",
+      "recommendation": "Verify coverage with payer prior to service. Consider alternative covered options."
+    },
+    {
+      "id": "DP008",
+      "code": "COORDINATION_OF_BENEFITS",
+      "description": "Patient may have multiple active insurance plans requiring coordination",
+      "keywords": ["dual coverage", "secondary insurance", "coordination of benefits", "primary payer", "secondary payer"],
+      "risk_level": "MEDIUM",
+      "recommendation": "Verify primary payer and bill in correct coordination of benefits order."
+    }
+  ]
+}

@@ -32,6 +32,17 @@ def _make_extractor(state):
         {"tool": "tool_get_patient_info", "input": "John Smith"},
         {"tool": "tool_get_medications", "input": "P001"}
     ]
+    state["extracted_patient_identifier"] = {"type": "name", "value": "John Smith", "ambiguous": False}
+    return state
+
+
+def _make_extractor_no_patient(state):
+    """Mock extractor: no patient identifier — routes to clarification (Extractor → clarification)."""
+    state["extracted_patient_identifier"] = {"type": "none", "ambiguous": True, "reason": "no patient name or ID found"}
+    state["clarification_needed"] = "Which patient are you referring to?"
+    state["pending_user_input"] = True
+    state["extractions"] = []
+    state["tool_trace"] = []
     return state
 
 
@@ -143,8 +154,17 @@ class TestWorkflowSessionIsolation:
 # ── Tests: clarification pause/resume ────────────────────────────────────────
 
 class TestWorkflowClarification:
+    def test_workflow_extractor_routes_to_clarification_when_no_identifier(self):
+        """When Extractor Step 0 finds no patient identifier, workflow routes Extractor → clarification → END."""
+        with patch("langgraph_agent.workflow.extractor_node", side_effect=_make_extractor_no_patient):
+            result = run_workflow("Does he have any allergies?", session_id="test-no-id-1")
+        assert result["pending_user_input"] is True
+        assert "Which patient" in (result.get("clarification_needed") or "")
+        # Should not have run auditor (clarification node runs then END)
+        assert result.get("extractions") == []
+
     def test_workflow_pauses_on_ambiguous_input(self):
-        """Ambiguous patient query causes workflow to pause with pending_user_input=True."""
+        """Ambiguous patient query (from Auditor) causes workflow to pause with pending_user_input=True."""
         with patch("langgraph_agent.workflow.extractor_node", side_effect=_make_extractor), \
              patch("langgraph_agent.workflow.auditor_node", side_effect=_make_ambiguous_auditor):
             result = run_workflow("What medications is John taking?", session_id="test-ambig-1")
