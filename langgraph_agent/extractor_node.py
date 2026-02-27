@@ -603,19 +603,27 @@ def extractor_node(state: AgentState) -> AgentState:
 
             if current_hash and current_hash == cached_hash and cached_pages:
                 # Cache hit — same document bytes, skip extraction.
-                # Use .items() to preserve the page number stored as the dict key.
-                # Without this, page_number=None collapses all anchors to p.1
-                # in the UI and deduplication filters out pages 2-N.
+                # cached_pages is a dict of page_key → list[str] (all elements on that page).
+                # Each list entry is restored as a separate extraction so no element is lost
+                # on follow-up turns (the previous single-string-per-page scheme silently
+                # dropped every element after the first on any given page).
                 logger.info("Extractor: PDF cache hit (hash=%s) — skipping pdf_extractor.", current_hash[:8])
-                for page_key, page_text in cached_pages.items():
-                    all_extractions.append({
-                        "claim": page_text,
-                        "citation": page_text,
-                        "source": pdf_source_file,
-                        "verbatim": True,
-                        "page_number": int(page_key) if str(page_key).isdigit() else None,
-                        "element_type": "cached",
-                    })
+                for page_key, page_entries in cached_pages.items():
+                    page_num = int(page_key) if str(page_key).isdigit() else None
+                    # Support both old (str) and new (list[str]) cache formats.
+                    if isinstance(page_entries, str):
+                        page_entries = [page_entries]
+                    for page_text in page_entries:
+                        if not page_text:
+                            continue
+                        all_extractions.append({
+                            "claim": page_text,
+                            "citation": page_text,
+                            "source": pdf_source_file,
+                            "verbatim": True,
+                            "page_number": page_num,
+                            "element_type": "cached",
+                        })
                 documents_processed.append(pdf_source_file)
                 tool_call_history.append({"tool": "pdf_extractor", "status": "cache_hit", "ts": _ts})
             else:
@@ -635,13 +643,18 @@ def extractor_node(state: AgentState) -> AgentState:
                 })
                 tool_call_history.append({"tool": "pdf_extractor", "status": "success" if pdf_result.get("success") else "fail", "ts": _ts})
                 if pdf_result.get("success"):
+                    # Store ALL elements per page as a list so multi-element pages
+                    # (e.g. a page with multiple tables and paragraphs) survive cache
+                    # round-trips without losing any element after the first.
                     new_pages: dict = {}
                     for pdf_ext in pdf_result.get("extractions", []):
                         page_num = pdf_ext.get("page_number") or 0
-                        new_pages[str(page_num)] = pdf_ext.get("verbatim_quote", "")
+                        page_key = str(page_num)
+                        verbatim = pdf_ext.get("verbatim_quote", "")
+                        new_pages.setdefault(page_key, []).append(verbatim)
                         all_extractions.append({
-                            "claim": pdf_ext.get("verbatim_quote", ""),
-                            "citation": pdf_ext.get("verbatim_quote", ""),
+                            "claim": verbatim,
+                            "citation": verbatim,
                             "source": pdf_ext.get("source_file", pdf_source_file),
                             "verbatim": True,
                             "page_number": pdf_ext.get("page_number"),
@@ -684,6 +697,16 @@ def extractor_node(state: AgentState) -> AgentState:
                 "status": "success" if policy_result.get("success") else "fail",
                 "ts": _ts,
             })
+            if policy_result.get("no_policy_found"):
+                _payer_id = state.get("payer_id", "")
+                all_extractions.append({
+                    "claim": policy_result["message"],
+                    "citation": f"policy_search:{_payer_id}",
+                    "source": "policy_search",
+                    "verbatim": True,
+                    "synthetic": True,
+                    "flag": "NO_POLICY_FOUND",
+                })
             if isinstance(state.get("payer_policy_cache"), dict):
                 state["payer_policy_cache"][state.get("payer_id", "")] = policy_result
 

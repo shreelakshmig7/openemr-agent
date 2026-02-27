@@ -8,6 +8,18 @@ using the unstructured.io API. Returns verbatim quotes with page numbers
 and source file attribution for every element, ensuring the auditor node
 can verify every claim against its exact source location.
 
+Design decisions (v2):
+  1. All element types are captured — Table and UncategorizedText are no
+     longer silently dropped. Table text is surfaced from the `text` field
+     with `metadata.text_as_html` as a fallback so drug-interaction tables
+     and prior-auth criteria grids are never omitted.
+  2. Every extraction chunk carries a required `page_number` metadata field.
+     This powers the Logic Roll-up UI and lets the auditor node cite specific
+     pages when validating claims.
+  3. OCR sensitivity: hi_res strategy is always used so scanned / image-based
+     prior-auth documents (common in RCM) are fully OCR'd. Falling back to
+     auto for retry if hi_res fails keeps the system resilient.
+
 When UNSTRUCTURED_API_KEY is not set, returns a structured error with an
 empty extractions list — the tool never raises an exception to the caller.
 
@@ -16,6 +28,7 @@ Key functions:
     _call_unstructured_api: Wraps the unstructured-client API call (mockable in tests).
     _build_extraction_result: Converts raw API elements to the standard extraction format.
     _is_api_available: Returns True if UNSTRUCTURED_API_KEY is present and non-empty.
+    _get_table_text: Extracts text from Table elements including HTML fallback.
 
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
@@ -23,11 +36,17 @@ Project: AgentForge — Healthcare RCM AI Agent
 
 import logging
 import os
+import re
 from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
 UNSTRUCTURED_SERVER_URL = "https://api.unstructuredapp.io"
+
+# Element types that the Unstructured API may return. We capture ALL of them —
+# no type is excluded, so tables, uncategorized text, and list items are all
+# surfaced to the agent.
+_TABLE_TYPES = {"Table", "FigureCaption"}
 
 
 # ── API availability check ────────────────────────────────────────────────────
@@ -55,6 +74,9 @@ def _get_element_text(el: Any) -> str:
     """
     Extract the text content from a raw element, handling dict and object formats.
 
+    For Table elements, falls back to metadata.text_as_html (stripped of tags)
+    when the plain text field is absent or empty, ensuring table rows are not lost.
+
     Args:
         el: A raw element returned by the unstructured API — either a dict or an object.
 
@@ -64,9 +86,61 @@ def _get_element_text(el: Any) -> str:
     Raises:
         Never.
     """
+    element_type = _get_element_type(el)
+
     if isinstance(el, dict):
-        return el.get("text", "") or ""
-    return getattr(el, "text", "") or ""
+        text = el.get("text", "") or ""
+        if not text.strip() and element_type in _TABLE_TYPES:
+            text = _get_table_text(el)
+        return text
+    text = getattr(el, "text", "") or ""
+    if not text.strip() and element_type in _TABLE_TYPES:
+        text = _get_table_text(el)
+    return text
+
+
+def _get_table_text(el: Any) -> str:
+    """
+    Extract text from a Table element, using metadata.text_as_html as a fallback.
+
+    The Unstructured API stores a structured HTML table in metadata.text_as_html
+    even when the plain-text field is empty. This function strips HTML tags and
+    collapses whitespace so the resulting string is readable by the LLM and can
+    be used as a verbatim citation.
+
+    Args:
+        el: A Table-type element returned by the unstructured API.
+
+    Returns:
+        str: Plain-text representation of the table, or empty string.
+
+    Raises:
+        Never.
+    """
+    try:
+        if isinstance(el, dict):
+            meta = el.get("metadata", {})
+            html = (meta.get("text_as_html", "") if isinstance(meta, dict) else "") or ""
+        else:
+            meta = getattr(el, "metadata", None) or {}
+            if isinstance(meta, dict):
+                html = meta.get("text_as_html", "") or ""
+            else:
+                html = getattr(meta, "text_as_html", "") or ""
+
+        if not html.strip():
+            return ""
+
+        # Strip HTML tags and collapse whitespace runs to single spaces/newlines.
+        text = re.sub(r"<tr[^>]*>", "\n", html, flags=re.IGNORECASE)
+        text = re.sub(r"<td[^>]*>|<th[^>]*>", " | ", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+    except Exception as exc:
+        logger.warning("_get_table_text failed: %s", exc)
+        return ""
 
 
 def _get_element_type(el: Any) -> str:
@@ -90,6 +164,9 @@ def _get_element_type(el: Any) -> str:
 def _get_page_number(el: Any) -> Optional[int]:
     """
     Extract the page number from a raw element's metadata.
+
+    Every extraction chunk must carry a page_number so the Logic Roll-up UI
+    can anchor citations to exact pages and the auditor can validate them.
 
     Args:
         el: A raw element returned by the unstructured API — either a dict or an object.
@@ -118,15 +195,17 @@ def _get_page_number(el: Any) -> Optional[int]:
 
 # ── API caller (isolated for mocking in tests) ────────────────────────────────
 
-def _call_unstructured_api(source_file: str) -> List[Any]:
+def _call_unstructured_api(source_file: str, strategy: str = "hi_res") -> List[Any]:
     """
     Call the unstructured.io API to partition a PDF file into structured elements.
 
-    Reads the file from disk and sends it to the unstructured API using the
-    official unstructured-client SDK. Returns the raw list of elements.
+    Uses hi_res strategy by default to apply full OCR on scanned / image-based
+    prior-auth documents, ensuring no clinical text or table data is omitted.
+    Falls back to auto strategy on retry when hi_res raises an error.
 
     Args:
         source_file: Absolute or relative path to the PDF file on disk.
+        strategy: Unstructured partition strategy — "hi_res" or "auto".
 
     Returns:
         List[Any]: Raw elements returned by the API (dicts or objects).
@@ -149,13 +228,17 @@ def _call_unstructured_api(source_file: str) -> List[Any]:
 
     file_name = os.path.basename(source_file)
 
+    # Map strategy string to SDK enum. hi_res triggers layout-aware OCR so
+    # tables and image-embedded text are fully extracted.
+    strategy_enum = shared.Strategy.HI_RES if strategy == "hi_res" else shared.Strategy.AUTO
+
     req = operations.PartitionRequest(
         partition_parameters=shared.PartitionParameters(
             files=shared.Files(
                 content=file_content,
                 file_name=file_name,
             ),
-            strategy=shared.Strategy.AUTO,
+            strategy=strategy_enum,
         ),
     )
 
@@ -169,9 +252,9 @@ def _build_extraction_result(raw_elements: List[Any], source_file: str) -> dict:
     """
     Convert raw unstructured API elements into the standard extraction format.
 
-    Filters out elements with empty or whitespace-only text. For each valid
-    element, produces a dict with verbatim_quote, page_number, element_type,
-    and source_file. Handles both dict-style and object-style raw elements.
+    All element types are included — Table, UncategorizedText, NarrativeText,
+    Title, ListItem, etc. Each extraction carries a mandatory page_number field
+    for Logic Roll-up UI anchoring and auditor citation validation.
 
     Args:
         raw_elements: List of raw elements from _call_unstructured_api or a mock.
@@ -185,6 +268,11 @@ def _build_extraction_result(raw_elements: List[Any], source_file: str) -> dict:
             "element_count": int,
             "error": None
         }
+        Each extraction dict contains:
+            "verbatim_quote": str    — full text of the element
+            "page_number":    int|None — page where element appears
+            "element_type":   str    — Unstructured element category
+            "source_file":    str    — originating PDF path
 
     Raises:
         Never — returns success: True with empty extractions on any element-level failure.
@@ -196,16 +284,24 @@ def _build_extraction_result(raw_elements: List[Any], source_file: str) -> dict:
             text = _get_element_text(el)
             if not text or not text.strip():
                 continue
+            page_number = _get_page_number(el)
+            element_type = _get_element_type(el)
             extractions.append({
-                "verbatim_quote": text,
-                "page_number": _get_page_number(el),
-                "element_type": _get_element_type(el),
+                "verbatim_quote": text.strip(),
+                "page_number": page_number,
+                "element_type": element_type,
                 "source_file": source_file,
             })
         except Exception as e:
             logger.warning("Skipping malformed element during extraction: %s", e)
             continue
 
+    logger.info(
+        "PDF extraction complete: %d elements from '%s' (%d raw)",
+        len(extractions),
+        os.path.basename(source_file),
+        len(raw_elements),
+    )
     return {
         "success": True,
         "extractions": extractions,
@@ -221,10 +317,11 @@ def extract_pdf(source_file: str) -> dict:
     """
     Extract structured clinical text from a PDF using the unstructured.io API.
 
-    Validates that the API key is set and the source_file is non-empty before
-    making any API call. On success, returns all extracted elements as verbatim
-    quotes with page numbers and source attribution. On failure, returns a
-    structured error dict — never raises an exception to the caller.
+    Uses hi_res OCR strategy to fully extract image-based prior-auth documents.
+    Captures ALL element types (NarrativeText, Table, UncategorizedText, etc.)
+    so that drug-interaction tables and criteria grids are not silently dropped.
+    Falls back from hi_res to auto strategy on retry when the remote API rejects
+    hi_res (e.g. unsupported file format).
 
     Args:
         source_file: Path to the PDF file to extract. Can be an absolute path
@@ -265,7 +362,18 @@ def extract_pdf(source_file: str) -> dict:
                 ),
             }
 
-        raw_elements = _call_unstructured_api(source_file)
+        # Attempt hi_res first; fall back to auto if hi_res is rejected.
+        try:
+            logger.info("PDF extraction starting with hi_res strategy: '%s'", source_file)
+            raw_elements = _call_unstructured_api(source_file, strategy="hi_res")
+        except Exception as hi_res_exc:
+            logger.warning(
+                "hi_res strategy failed for '%s' (%s) — retrying with auto strategy.",
+                source_file,
+                hi_res_exc,
+            )
+            raw_elements = _call_unstructured_api(source_file, strategy="auto")
+
         return _build_extraction_result(raw_elements, source_file)
 
     except FileNotFoundError:
