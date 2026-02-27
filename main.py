@@ -152,6 +152,39 @@ def _load_latest_results(results_dir: str) -> Optional[dict]:
         return None
 
 
+def _resolve_pdf_path(pdf_source_file: Optional[str]) -> Optional[str]:
+    """
+    Resolve pdf_source_file to an absolute path under the application root.
+
+    The upload endpoint returns a relative path (e.g. "uploads/file.pdf"). In
+    production, the process CWD may differ from the app root, so open() would
+    fail. This helper resolves relative paths against the directory containing
+    main.py so the extractor finds the file regardless of CWD.
+
+    Args:
+        pdf_source_file: Path from the client (relative or absolute).
+
+    Returns:
+        Absolute path under the app root, or None if invalid or path traversal.
+    """
+    if not pdf_source_file or not pdf_source_file.strip():
+        return None
+    path = pdf_source_file.strip()
+    base = os.path.dirname(os.path.abspath(__file__))
+    if os.path.isabs(path):
+        resolved = os.path.normpath(path)
+    else:
+        resolved = os.path.normpath(os.path.join(base, path))
+    try:
+        base_real = os.path.realpath(base)
+        resolved_real = os.path.realpath(resolved)
+        if resolved_real != base_real and not resolved_real.startswith(base_real + os.sep):
+            return None
+    except Exception:
+        return None
+    return resolved
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -238,11 +271,15 @@ def ask(request: AskRequest) -> AskResponse:
         clarification_response = request.question
         query = prior_state.get("input_query", request.question)
 
+    # Resolve relative PDF path to absolute so the extractor finds the file in production
+    # (CWD may differ from app root when deployed).
+    pdf_path = _resolve_pdf_path(request.pdf_source_file)
+
     result = run_workflow(
         query=query,
         session_id=session_id,
         clarification_response=clarification_response,
-        pdf_source_file=request.pdf_source_file,
+        pdf_source_file=pdf_path,
         prior_state=prior_state,
         payer_id=request.payer_id,
         procedure_code=request.procedure_code,

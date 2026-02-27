@@ -41,6 +41,45 @@ open http://localhost:8000
 
 ---
 
+## Deploy on Railway
+
+The app is already set up for Railway: **Procfile** runs `uvicorn main:app --host 0.0.0.0 --port $PORT`.
+
+### 1. Set environment variables
+
+In the Railway project → **Variables**, add (no `.env` file is deployed):
+
+| Variable | Required | Notes |
+|----------|----------|--------|
+| `ANTHROPIC_API_KEY` | Yes | From [console.anthropic.com](https://console.anthropic.com/) |
+| `UNSTRUCTURED_API_KEY` | Yes* | For PDF extraction; [unstructured.io](https://unstructured.io) |
+| `LANGSMITH_API_KEY` | No | LangSmith tracing |
+| `LANGCHAIN_TRACING_V2` | No | Set to `true` to enable tracing |
+| `LANGCHAIN_PROJECT` | No | e.g. `openemr-agent` |
+| `PINECONE_API_KEY` | No | Only if using real Pinecone policy search |
+| `PINECONE_ENV` | No | e.g. `us-east-1` |
+| `PINECONE_INDEX` | No | e.g. `agentforge-rcm-policies` |
+| `VOYAGE_API_KEY` | No | Only if using real Pinecone (embeddings) |
+| `USE_REAL_PINECONE` | No | Set to `true` for Pinecone; omit or `false` for mock policy search |
+
+\* Without `UNSTRUCTURED_API_KEY`, PDF extraction will fail; the rest of the agent still works.
+
+### 2. Optional: Python version
+
+To pin the runtime, add a **runtime.txt** in the project root:
+```
+python-3.11.6
+```
+Otherwise Railway infers from `requirements.txt`.
+
+### 3. Limitations on Railway
+
+- **Ephemeral filesystem:** SQLite checkpoints (`agent_checkpoints.sqlite`) and in-memory sessions are lost on redeploy or restart. Multi-turn context works within a single run but does not persist across restarts.
+- **PDF uploads:** Uploaded PDFs are written to the app’s `uploads/` directory. If you run **multiple replicas**, the instance that serves `POST /upload` may differ from the one that serves `POST /ask`; the second instance won’t have the file, so the agent may respond “I did not have access to that document.” Use a **single replica** for PDF queries, or add shared storage (e.g. S3) and change the app to read/write PDFs there.
+- **Policy search:** With `USE_REAL_PINECONE=false` (or unset), policy search uses the mock backend; no Pinecone/Voyage keys needed.
+
+---
+
 ## Mock Patient Database
 
 All patient data lives in `mock_data/`. There are **11 patients** available for testing.
