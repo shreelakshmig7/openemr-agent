@@ -13,6 +13,8 @@ Key fields:
     pending_user_input: Pauses entire workflow without discarding work.
     iteration_count: Enforces 3-iteration ceiling on Auditor review loop.
     routing_decision: Set by Router/Auditor to control conditional edge routing.
+    pdf_source_file: Optional PDF path to process alongside the text query.
+    denial_risk: Set by Extractor Node — result of analyze_denial_risk() on all extractions.
 
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
@@ -49,6 +51,21 @@ class AgentState(TypedDict):
         insufficient_documentation_flags: Gaps explicitly listed when is_partial=True.
         tool_trace: Record of all tool calls made during extraction.
         extracted_patient_identifier: Result of Step 0 (Haiku) — type, value, ambiguous, reason.
+        pdf_source_file: Optional path to a clinical PDF to process alongside the text query.
+            When set, the Extractor Node runs extract_pdf() and merges results into extractions.
+        denial_risk: Set by Extractor Node after all extractions are collected. Contains the
+            result of analyze_denial_risk() — risk_level, matched_patterns, recommendations,
+            and denial_risk_score (0.0–1.0).
+        allergy_conflict_result: Set by Extractor Node for SAFETY_CHECK queries. Contains the
+            result of check_allergy_conflict() — conflict, drug, allergy, conflict_type, severity.
+            Passed to the Auditor Node for use in response synthesis.
+        ehr_confidence_penalty: Confidence penalty (0–100) applied when EHR data is unavailable.
+            Set to 45 when patient is None (Scenario A: PDF + unknown patient). Subtracted from
+            the base confidence score in the Auditor Node to guarantee escalation below 90%.
+        citation_anchors: List of PDF citation anchor dicts built by Output Node. Each entry
+            contains label, file, and page so the UI can open the PDF viewer and jump to the
+            exact page. Only populated for PDF-sourced extractions — EHR/mock sources are excluded.
+            Schema: [{"label": str, "file": str, "page": int}]
 
     Returns:
         TypedDict compatible with LangGraph StateGraph.
@@ -71,6 +88,11 @@ class AgentState(TypedDict):
     insufficient_documentation_flags: List[str]
     tool_trace: List[dict]
     extracted_patient_identifier: dict
+    pdf_source_file: str
+    denial_risk: dict
+    allergy_conflict_result: dict
+    ehr_confidence_penalty: int
+    citation_anchors: List[dict]
 
 
 def create_initial_state(query: str) -> AgentState:
@@ -105,4 +127,9 @@ def create_initial_state(query: str) -> AgentState:
         "insufficient_documentation_flags": [],
         "tool_trace": [],
         "extracted_patient_identifier": {},
+        "pdf_source_file": "",
+        "denial_risk": {},
+        "allergy_conflict_result": {},
+        "ehr_confidence_penalty": 0,
+        "citation_anchors": [],
     }

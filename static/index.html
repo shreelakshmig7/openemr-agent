@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AgentForge — Healthcare AI</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -26,12 +27,31 @@
       gap: 12px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.15);
       flex-shrink: 0;
+      z-index: 10;
     }
     header .icon { font-size: 28px; }
     header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
     header p  { font-size: 12px; opacity: 0.85; margin-top: 2px; }
 
-    /* ── Chat area ── */
+    /* ── Main split area ── */
+    #main-area {
+      flex: 1;
+      display: flex;
+      flex-direction: row;
+      overflow: hidden;
+    }
+
+    /* ── Chat pane (left) ── */
+    #chat-pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
+      transition: flex 0.3s ease;
+    }
+
+    /* ── Chat messages ── */
     #chat {
       flex: 1;
       overflow-y: auto;
@@ -39,6 +59,129 @@
       display: flex;
       flex-direction: column;
       gap: 16px;
+    }
+
+    /* ── PDF viewer pane (right) — hidden by default ── */
+    #pdf-pane {
+      width: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: #1a202c;
+      border-left: 0px solid #2d3748;
+      transition: width 0.35s ease, border-left-width 0.35s ease;
+      flex-shrink: 0;
+    }
+    #pdf-pane.open {
+      width: 55%;
+      border-left-width: 3px;
+    }
+
+    /* ── PDF viewer header ── */
+    #pdf-viewer-header {
+      background: #2d3748;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    #pdf-viewer-title {
+      color: #e2e8f0;
+      font-size: 13px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #pdf-close-btn {
+      background: none;
+      border: none;
+      color: #a0aec0;
+      font-size: 18px;
+      cursor: pointer;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: background 0.15s;
+    }
+    #pdf-close-btn:hover { background: #4a5568; color: #fff; }
+
+    /* ── Citation link pills ── */
+    #citation-links {
+      background: #2d3748;
+      padding: 8px 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      flex-shrink: 0;
+      border-bottom: 1px solid #4a5568;
+    }
+    .citation-pill {
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 16px;
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .citation-pill:hover  { background: #1e429f; transform: translateY(-1px); }
+    .citation-pill.active { background: #f6ad55; color: #1a202c; }
+
+    /* ── PDF canvas container ── */
+    #pdf-canvas-container {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px;
+      gap: 12px;
+    }
+
+    /* ── PDF canvas wrapper (for highlight overlay) ── */
+    .pdf-page-wrapper {
+      position: relative;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      border-radius: 2px;
+    }
+    .pdf-page-wrapper canvas {
+      display: block;
+    }
+
+    /* ── Pulse highlight overlay — the demo magic ── */
+    .pdf-highlight-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      border-radius: 2px;
+      animation: citation-pulse 1.2s ease-in-out infinite;
+      border: 4px solid rgba(246, 173, 85, 0.9);
+    }
+
+    @keyframes citation-pulse {
+      0%   { background: rgba(255, 220, 0, 0.20); border-color: rgba(246, 173, 85, 1.0); }
+      50%  { background: rgba(255, 220, 0, 0.05); border-color: rgba(246, 173, 85, 0.3); }
+      100% { background: rgba(255, 220, 0, 0.20); border-color: rgba(246, 173, 85, 1.0); }
+    }
+
+    #pdf-status {
+      color: #a0aec0;
+      font-size: 13px;
+      text-align: center;
+      padding: 24px;
+      line-height: 1.6;
     }
 
     /* ── Welcome card ── */
@@ -69,7 +212,7 @@
 
     /* ── Message bubbles ── */
     .msg { display: flex; flex-direction: column; max-width: 680px; width: 100%; }
-    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.user  { align-self: flex-end; align-items: flex-end; }
     .msg.agent { align-self: center; align-items: flex-start; }
 
     .bubble {
@@ -115,10 +258,31 @@
       padding: 0 4px;
     }
 
-    /* ── Tool Trace ── */
-    .trace-container {
+    /* ── Citation anchor strip in message ── */
+    .citation-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
       margin-top: 8px;
     }
+    .citation-anchor-btn {
+      background: #ebf4ff;
+      border: 1px solid #bee3f8;
+      color: #1a56db;
+      border-radius: 14px;
+      padding: 4px 11px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .citation-anchor-btn:hover { background: #bee3f8; transform: translateY(-1px); }
+
+    /* ── Tool Trace ── */
+    .trace-container { margin-top: 8px; }
     .trace-container details {
       border: 1px solid #e2e8f0;
       border-radius: 8px;
@@ -145,12 +309,7 @@
     }
     .trace-container details[open] summary::before { transform: rotate(90deg); }
     .trace-steps { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
-    .trace-step {
-      background: #fff;
-      border: 1px solid #e2e8f0;
-      border-radius: 6px;
-      overflow: hidden;
-    }
+    .trace-step { background: #fff; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; }
     .trace-step-header {
       background: #ebf4ff;
       padding: 5px 10px;
@@ -189,17 +348,55 @@
       align-items: center;
       padding: 14px 18px;
     }
-    .dot {
-      width: 7px; height: 7px;
-      background: #a0aec0;
-      border-radius: 50%;
-      animation: bounce 1.2s infinite;
-    }
+    .dot { width: 7px; height: 7px; background: #a0aec0; border-radius: 50%; animation: bounce 1.2s infinite; }
     .dot:nth-child(2) { animation-delay: 0.2s; }
     .dot:nth-child(3) { animation-delay: 0.4s; }
     @keyframes bounce {
       0%, 60%, 100% { transform: translateY(0); }
       30%           { transform: translateY(-6px); }
+    }
+
+    /* ── Denial risk badge ── */
+    .denial-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-top: 8px;
+    }
+    .denial-NONE     { background: #f0fff4; border: 1px solid #9ae6b4; color: #276749; }
+    .denial-LOW      { background: #f0fff4; border: 1px solid #9ae6b4; color: #276749; }
+    .denial-MEDIUM   { background: #fffbeb; border: 1px solid #f6e05e; color: #744210; }
+    .denial-HIGH     { background: #fff5f5; border: 1px solid #fc8181; color: #c53030; }
+    .denial-CRITICAL { background: #c53030; border: 1px solid #c53030; color: #fff; }
+    .denial-UNKNOWN  { background: #f7fafc; border: 1px solid #cbd5e0; color: #4a5568; }
+
+    /* ── PDF attachment badge ── */
+    #pdf-badge {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      background: #ebf4ff;
+      border: 1px solid #bee3f8;
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 12px;
+      color: #1a56db;
+      font-weight: 600;
+      margin: 0 16px 8px;
+      flex-shrink: 0;
+    }
+    #pdf-badge button {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: #c53030;
+      font-size: 14px;
+      line-height: 1;
+      padding: 0 0 0 4px;
     }
 
     /* ── Input bar ── */
@@ -224,6 +421,21 @@
       font-family: inherit;
     }
     #input:focus { border-color: #1a56db; }
+    #upload-btn {
+      background: #f7fafc;
+      color: #4a5568;
+      border: 1px solid #cbd5e0;
+      border-radius: 10px;
+      padding: 0 14px;
+      font-size: 18px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #upload-btn:hover { background: #ebf4ff; border-color: #1a56db; }
     #send-btn {
       background: #1a56db;
       color: #fff;
@@ -237,7 +449,7 @@
       height: 44px;
       white-space: nowrap;
     }
-    #send-btn:hover   { background: #1e429f; }
+    #send-btn:hover    { background: #1e429f; }
     #send-btn:disabled { background: #a0aec0; cursor: not-allowed; }
   </style>
 </head>
@@ -251,42 +463,201 @@
   </div>
 </header>
 
-<div id="chat">
-  <div class="welcome">
-    <h2>What can I help you with?</h2>
-    <p>Ask me about patient medications, drug interactions, or allergy conflicts. Try one of the examples below or type your own question.</p>
-    <div class="chips">
-      <button class="chip" onclick="sendChip(this)">💊 What medications is John Smith on?</button>
-      <button class="chip" onclick="sendChip(this)">⚠️ Check drug interactions for Mary Johnson</button>
-      <button class="chip" onclick="sendChip(this)">🚨 Is it safe to give Robert Davis Aspirin?</button>
-      <button class="chip" onclick="sendChip(this)">🩺 Does John Smith have any known allergies?</button>
+<div id="main-area">
+
+  <!-- ── Left: chat pane ── -->
+  <div id="chat-pane">
+    <div id="chat">
+      <div class="welcome">
+        <h2>What can I help you with?</h2>
+        <p>Ask me about patient medications, drug interactions, or allergy conflicts. Attach a clinical PDF to unlock inline citations — click any 📄 tag to jump to the exact page.</p>
+        <div class="chips">
+          <button class="chip" onclick="sendChip(this)">💊 What medications is John Smith on?</button>
+          <button class="chip" onclick="sendChip(this)">⚠️ Check drug interactions for Mary Johnson</button>
+          <button class="chip" onclick="sendChip(this)">🚨 Is it safe to give Robert Davis Aspirin?</button>
+          <button class="chip" onclick="sendChip(this)">🩺 Does John Smith have any known allergies?</button>
+          <button class="chip" onclick="sendChip(this)">🚨 Is it safe to give Emily Rodriguez Amoxicillin?</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="pdf-badge">
+      📄 <span id="pdf-badge-name"></span>
+      <button onclick="clearPdf()" title="Remove PDF">✕</button>
+    </div>
+    <div id="input-bar">
+      <button id="upload-btn" title="Attach a clinical PDF" onclick="document.getElementById('pdf-input').click()">📎</button>
+      <input type="file" id="pdf-input" accept=".pdf" style="display:none" onchange="handlePdfSelect(event)" />
+      <textarea id="input" placeholder="Ask about a patient's medications, interactions, or allergies…" rows="1"></textarea>
+      <button id="send-btn" onclick="sendMessage()">Send</button>
     </div>
   </div>
-</div>
 
-<div id="input-bar">
-  <textarea id="input" placeholder="Ask about a patient's medications, interactions, or allergies…" rows="1"></textarea>
-  <button id="send-btn" onclick="sendMessage()">Send</button>
-</div>
+  <!-- ── Right: PDF viewer pane ── -->
+  <div id="pdf-pane">
+    <div id="pdf-viewer-header">
+      <div id="pdf-viewer-title">📄 Clinical Document</div>
+      <button id="pdf-close-btn" onclick="closePdfPane()" title="Close viewer">✕</button>
+    </div>
+    <div id="citation-links"></div>
+    <div id="pdf-canvas-container">
+      <div id="pdf-status">Select a citation below to jump to the page.</div>
+    </div>
+  </div>
+
+</div><!-- #main-area -->
 
 <script>
-  let sessionId = null;
+  // ── pdf.js setup ──────────────────────────────────────────────────────────
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-  const chat     = document.getElementById('chat');
-  const input    = document.getElementById('input');
-  const sendBtn  = document.getElementById('send-btn');
+  let sessionId       = null;
+  let attachedPdfPath = null;
+  let pdfDoc          = null;   // loaded pdf.js document
+  let currentPdfPath  = null;   // path of currently loaded PDF
+  let activePill      = null;   // currently highlighted citation pill
 
-  // Send on Enter (Shift+Enter for newline)
+  const chat             = document.getElementById('chat');
+  const input            = document.getElementById('input');
+  const sendBtn          = document.getElementById('send-btn');
+  const pdfBadge         = document.getElementById('pdf-badge');
+  const pdfBadgeName     = document.getElementById('pdf-badge-name');
+  const pdfPane          = document.getElementById('pdf-pane');
+  const citationLinks    = document.getElementById('citation-links');
+  const pdfCanvasContainer = document.getElementById('pdf-canvas-container');
+  const pdfStatus        = document.getElementById('pdf-status');
+  const pdfViewerTitle   = document.getElementById('pdf-viewer-title');
+
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
 
+  // ── PDF viewer controls ───────────────────────────────────────────────────
+
+  function openPdfPane(anchors) {
+    citationLinks.innerHTML = '';
+    anchors.forEach((anchor, idx) => {
+      const btn = document.createElement('button');
+      btn.className = 'citation-pill';
+      btn.textContent = '📄 ' + anchor.label;
+      btn.dataset.file = anchor.file;
+      btn.dataset.page = anchor.page;
+      btn.onclick = () => jumpToPage(anchor, btn);
+      citationLinks.appendChild(btn);
+    });
+    pdfPane.classList.add('open');
+    // Wait for the CSS slide-in transition (350ms) to finish before rendering
+    // so clientWidth reflects the actual pane size.
+    if (anchors.length > 0) {
+      const firstBtn = citationLinks.querySelector('.citation-pill');
+      setTimeout(() => jumpToPage(anchors[0], firstBtn), 380);
+    }
+  }
+
+  function closePdfPane() {
+    pdfPane.classList.remove('open');
+    pdfDoc = null;
+    currentPdfPath = null;
+    pdfCanvasContainer.innerHTML = '<div id="pdf-status">Select a citation below to jump to the page.</div>';
+    citationLinks.innerHTML = '';
+    if (activePill) { activePill.classList.remove('active'); activePill = null; }
+  }
+
+  async function jumpToPage(anchor, pillBtn) {
+    // Update active pill
+    if (activePill) activePill.classList.remove('active');
+    activePill = pillBtn;
+    if (pillBtn) pillBtn.classList.add('active');
+
+    pdfViewerTitle.textContent = '📄 ' + anchor.label;
+
+    try {
+      // Load PDF if it's a new file
+      if (currentPdfPath !== anchor.file) {
+        pdfStatus.textContent = 'Loading document…';
+        pdfCanvasContainer.innerHTML = '';
+        const pdfUrl = '/pdf?path=' + encodeURIComponent(anchor.file);
+        pdfDoc = await pdfjsLib.getDocument(pdfUrl).promise;
+        currentPdfPath = anchor.file;
+      }
+
+      const page = await pdfDoc.getPage(anchor.page);
+
+      // Fit page to the container width with 32px padding on each side
+      const containerWidth = pdfCanvasContainer.clientWidth - 32;
+      const baseViewport = page.getViewport({ scale: 1.0 });
+      const scale = containerWidth / baseViewport.width;
+      const viewport = page.getViewport({ scale });
+
+      // Clear container and render
+      pdfCanvasContainer.innerHTML = '';
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'pdf-page-wrapper';
+      wrapper.style.width  = viewport.width + 'px';
+      wrapper.style.height = viewport.height + 'px';
+
+      const canvas = document.createElement('canvas');
+      canvas.width  = viewport.width;
+      canvas.height = viewport.height;
+      wrapper.appendChild(canvas);
+
+      // Pulse highlight overlay
+      const overlay = document.createElement('div');
+      overlay.className = 'pdf-highlight-overlay';
+      wrapper.appendChild(overlay);
+
+      pdfCanvasContainer.appendChild(wrapper);
+
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+    } catch (err) {
+      pdfCanvasContainer.innerHTML =
+        `<div id="pdf-status">Could not load page: ${escHtml(String(err))}</div>`;
+    }
+  }
+
+  // ── Upload handling ───────────────────────────────────────────────────────
+
+  async function handlePdfSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    sendBtn.disabled = true;
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.success) {
+        attachedPdfPath = data.path;
+        pdfBadgeName.textContent = data.filename;
+        pdfBadge.style.display = 'flex';
+      } else {
+        alert('PDF upload failed: ' + (data.error || 'Unknown error'));
+      }
+    } catch (e) {
+      alert('Could not upload PDF. Is the server running?');
+    } finally {
+      sendBtn.disabled = false;
+      event.target.value = '';
+    }
+  }
+
+  function clearPdf() {
+    attachedPdfPath = null;
+    pdfBadge.style.display = 'none';
+    pdfBadgeName.textContent = '';
+  }
+
   function sendChip(btn) {
-    // Strip emoji prefix for the actual query text
     const text = btn.textContent.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}⚠🚨💊🩺🏥]\s*/u, '').trim();
     input.value = text;
     sendMessage();
   }
+
+  // ── Message rendering ─────────────────────────────────────────────────────
 
   function appendUserMessage(text) {
     const div = document.createElement('div');
@@ -332,7 +703,43 @@
       </div>`;
   }
 
+  function buildDenialBadgeHtml(denialRisk) {
+    if (!denialRisk || !denialRisk.risk_level) return '';
+    const level = denialRisk.risk_level;
+    if (level === 'NONE') return '';
+    const score = denialRisk.denial_risk_score != null ? Math.round(denialRisk.denial_risk_score * 100) : null;
+    const icons = { NONE: '✅', LOW: '✅', MEDIUM: '⚠️', HIGH: '🔴', CRITICAL: '🚨', UNKNOWN: '❓' };
+    const icon = icons[level] || '❓';
+    const scoreText = score != null ? ` (${score}%)` : '';
+    const patterns = (denialRisk.matched_patterns || []).map(p => p.code).join(', ');
+    const patternText = patterns ? `<br><span style="font-weight:400;font-size:11px;">Patterns: ${escHtml(patterns)}</span>` : '';
+    return `<div class="denial-badge denial-${level}">${icon} Denial Risk: ${level}${scoreText}${patternText}</div>`;
+  }
+
+  // Build citation anchor buttons — PDF only
+  function buildCitationStripHtml(anchors) {
+    if (!anchors || anchors.length === 0) return '';
+    const btns = anchors.map((a, i) =>
+      `<button class="citation-anchor-btn" onclick="handleCitationClick(${i})">📄 ${escHtml(a.label)}</button>`
+    ).join('');
+    return `<div class="citation-strip">${btns}</div>`;
+  }
+
+  // Keep anchors accessible globally for click handlers
+  let _lastAnchors = [];
+
+  function handleCitationClick(idx) {
+    const anchor = _lastAnchors[idx];
+    if (!anchor) return;
+    openPdfPane(_lastAnchors);
+    const pill = citationLinks.querySelectorAll('.citation-pill')[idx];
+    jumpToPage(anchor, pill || null);
+  }
+
   function appendAgentMessage(data) {
+    const anchors = data.citation_anchors || [];
+    _lastAnchors = anchors;
+
     const div = document.createElement('div');
     div.className = 'msg agent';
 
@@ -340,18 +747,27 @@
       ? `<div class="escalation-banner">🔴 Physician Review Recommended — Confidence below threshold. Do not proceed without clinical oversight.</div>`
       : '';
 
-    const confidencePct = Math.round((data.confidence || 0) * 100);
-    const traceHtml = buildTraceHtml(data.tool_trace);
+    const confidencePct  = Math.round((data.confidence || 0) * 100);
+    const traceHtml      = buildTraceHtml(data.tool_trace);
+    const denialHtml     = buildDenialBadgeHtml(data.denial_risk);
+    const citationHtml   = buildCitationStripHtml(anchors);
 
     div.innerHTML = `
       <div class="bubble">${escHtml(data.answer)}</div>
       ${escalationHtml}
+      ${denialHtml}
+      ${citationHtml}
       <div class="confidence">Confidence: ${confidencePct}%</div>
       <div class="disclaimer">${escHtml(data.disclaimer || '')}</div>
       ${traceHtml}
     `;
     chat.appendChild(div);
     scrollBottom();
+
+    // Auto-open the PDF pane if there are anchors
+    if (anchors.length > 0) {
+      openPdfPane(anchors);
+    }
   }
 
   function appendErrorMessage(text) {
@@ -362,19 +778,25 @@
     scrollBottom();
   }
 
+  // ── Send message ──────────────────────────────────────────────────────────
+
   async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
 
     input.value = '';
     sendBtn.disabled = true;
+    const pdfUsed = attachedPdfPath;
+    clearPdf();
 
-    appendUserMessage(text);
+    const userLabel = pdfUsed ? `${text}\n📎 ${pdfUsed.split('/').pop()}` : text;
+    appendUserMessage(userLabel);
     const typing = appendTyping();
 
     try {
       const body = { question: text };
       if (sessionId) body.session_id = sessionId;
+      if (pdfUsed)   body.pdf_source_file = pdfUsed;
 
       const res = await fetch('/ask', {
         method: 'POST',
@@ -400,9 +822,7 @@
     }
   }
 
-  function scrollBottom() {
-    chat.scrollTop = chat.scrollHeight;
-  }
+  function scrollBottom() { chat.scrollTop = chat.scrollHeight; }
 
   function escHtml(str) {
     return String(str)

@@ -33,7 +33,7 @@ from langgraph.graph import StateGraph, END
 from langgraph_agent.state import AgentState, create_initial_state
 from langgraph_agent.router_node import router_node, INTENT_OUT_OF_SCOPE
 from langgraph_agent.extractor_node import extractor_node
-from langgraph_agent.auditor_node import auditor_node
+from langgraph_agent.auditor_node import auditor_node, _synthesize_response, _build_citations_part
 from langgraph_agent.clarification_node import clarification_node, resume_from_clarification
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 
@@ -84,97 +84,20 @@ def _filter_extractions_by_intent(extractions: list, query_intent: str) -> list:
         return extractions
 
 
-def _build_safety_check_response(state: AgentState) -> AgentState:
-    """
-    Build a direct clinical verdict for SAFETY_CHECK queries.
-    Checks the proposed drug against allergy and interaction extractions,
-    leads with a verdict line, then appends supporting evidence.
-
-    Args:
-        state: AgentState with proposed_drug, extractions, and input_query set.
-
-    Returns:
-        AgentState: State with final_response set to a direct clinical verdict.
-
-    Raises:
-        Never — returns state unchanged on any failure.
-    """
-    try:
-        proposed_drug = (state.get("proposed_drug") or "").strip()
-        extractions = state.get("extractions", [])
-
-        allergy_extractions = [e for e in extractions if "patients" in e.get("source", "").lower()]
-        interaction_extractions = [e for e in extractions if "interactions" in e.get("source", "").lower()]
-        med_extractions = [e for e in extractions if "medications" in e.get("source", "").lower()]
-
-        verdict_lines = []
-
-        if proposed_drug:
-            drug_lower = proposed_drug.lower()
-
-            # Check allergy conflict
-            allergy_conflict = any(
-                drug_lower in e.get("claim", "").lower()
-                for e in allergy_extractions
-            )
-            if allergy_conflict:
-                verdict_lines.append(
-                    f"⚠️ ALLERGY CONFLICT: {proposed_drug} is listed in this patient's known allergies. "
-                    f"Do NOT administer."
-                )
-
-            # Check drug interaction involving proposed drug
-            drug_interactions = [
-                e for e in interaction_extractions
-                if drug_lower in e.get("claim", "").lower()
-            ]
-            for interaction in drug_interactions:
-                verdict_lines.append(f"⚠️ DRUG INTERACTION: {interaction.get('claim', '')}")
-
-            if not verdict_lines:
-                verdict_lines.append(
-                    f"No known allergy conflict or drug interaction found for {proposed_drug} "
-                    f"based on current records. Always verify with clinical judgment."
-                )
-        else:
-            verdict_lines.append(
-                "Safety check requested. Review the patient's allergies and current medications below."
-            )
-
-        # Append supporting evidence
-        supporting = []
-        supporting.extend(e.get("claim", "") for e in allergy_extractions if e.get("claim"))
-        supporting.extend(e.get("claim", "") for e in med_extractions if e.get("claim"))
-        supporting.extend(e.get("claim", "") for e in interaction_extractions if e.get("claim"))
-
-        citations_part = " | ".join(
-            f"Source: {e['source']}" for e in extractions if e.get("source")
-        )
-        supporting_text = " ".join(supporting)
-        evidence_block = supporting_text + (f" [{citations_part}]" if citations_part else "")
-
-        state["final_response"] = "\n\n".join(verdict_lines) + "\n\n" + evidence_block
-        return state
-    except Exception:
-        return state
-
-
 def _output_node(state: AgentState) -> AgentState:
     """
-    Output Node — filters extractions by query_intent, finalizes final_response,
-    appends the disclaimer, and sets confidence_score default if not already set.
+    Output Node — filters extractions by query_intent, synthesizes a structured
+    clinical response using Claude Sonnet, appends citations and the disclaimer.
 
-    For OUT_OF_SCOPE queries, final_response is already set by the Router Node
-    to the standard refusal string — this node only appends the disclaimer.
-
-    For clinical queries, extractions are filtered by query_intent so the
-    response only contains what the user actually asked about.
+    For OUT_OF_SCOPE queries, final_response is already set by the Router Node.
+    For partial results, final_response is already set by the Auditor Node.
+    For all other clinical queries: filter → synthesize → citations → disclaimer.
 
     Args:
         state: Final AgentState from Router (out_of_scope) or Auditor (pass/partial).
 
     Returns:
-        AgentState: State with intent-filtered final_response and disclaimer appended.
+        AgentState: State with synthesized final_response and disclaimer appended.
 
     Raises:
         Never — returns state unchanged on any failure.
@@ -182,28 +105,62 @@ def _output_node(state: AgentState) -> AgentState:
     try:
         query_intent = state.get("query_intent", "")
 
-        if query_intent == "SAFETY_CHECK":
-            state = _build_safety_check_response(state)
-        elif query_intent and query_intent != INTENT_OUT_OF_SCOPE:
-            # For other clinical queries, filter extractions to what was asked.
-            extractions = state.get("extractions", [])
-            relevant = _filter_extractions_by_intent(extractions, query_intent)
+        # OUT_OF_SCOPE and partial paths already have final_response set — just add disclaimer.
+        if query_intent == INTENT_OUT_OF_SCOPE or state.get("is_partial"):
+            if state.get("final_response") and not state["final_response"].endswith(CLINICAL_SAFETY_RULES["disclaimer"]):
+                state["final_response"] += "\n\n" + CLINICAL_SAFETY_RULES["disclaimer"]
+            if not state.get("confidence_score"):
+                state["confidence_score"] = 0.0
+            return state
 
-            if relevant and extractions and relevant != extractions:
-                citations_part = " | ".join(
-                    f"Source: {e['source']}" for e in relevant if e.get("source")
-                )
-                state["final_response"] = (
-                    " ".join(e["claim"] for e in relevant if e.get("claim"))
-                    + (f" [{citations_part}]" if citations_part else "")
-                )
+        # Filter extractions to what the query actually asked for.
+        extractions = state.get("extractions", [])
+        relevant = _filter_extractions_by_intent(extractions, query_intent)
+        if not relevant:
+            relevant = extractions
 
-        if state.get("final_response") and not state["final_response"].endswith(CLINICAL_SAFETY_RULES["disclaimer"]):
-            state["final_response"] = (
-                state["final_response"]
-                + "\n\n"
-                + CLINICAL_SAFETY_RULES["disclaimer"]
-            )
+        citations_part = _build_citations_part(relevant)
+
+        # Build PDF-only citation anchors for the UI viewer.
+        # EHR/mock sources (patients.json, medications.json, etc.) are excluded —
+        # only PDF extractions carry page numbers and deserve a viewer link.
+        seen_anchors: set = set()
+        citation_anchors = []
+        for e in relevant:
+            src = e.get("source", "")
+            page = e.get("page_number")
+            if not src.endswith(".pdf"):
+                continue
+            page_num = int(page) if page is not None else 1
+            anchor_key = (src, page_num)
+            if anchor_key in seen_anchors:
+                continue
+            seen_anchors.add(anchor_key)
+            file_label = src.split("/")[-1]
+            citation_anchors.append({
+                "label": f"{file_label} p.{page_num}",
+                "file": src,
+                "page": page_num,
+            })
+        state["citation_anchors"] = citation_anchors
+
+        # Synthesize a structured clinical response via Claude Sonnet.
+        # Falls back to raw claim join if synthesis fails.
+        synthesized = _synthesize_response(
+            query=state.get("input_query", ""),
+            query_intent=query_intent,
+            extractions=relevant,
+            allergy_conflict=state.get("allergy_conflict_result"),
+            denial_risk=state.get("denial_risk"),
+        )
+        if synthesized:
+            body = synthesized
+        else:
+            body = " ".join(e["claim"] for e in relevant if e.get("claim"))
+
+        citations_block = f" [{citations_part}]" if citations_part else ""
+        state["final_response"] = body + citations_block + "\n\n" + CLINICAL_SAFETY_RULES["disclaimer"]
+
         if not state.get("confidence_score"):
             state["confidence_score"] = 0.0
         return state
@@ -325,6 +282,7 @@ def run_workflow(
     query: str,
     session_id: Optional[str] = None,
     clarification_response: Optional[str] = None,
+    pdf_source_file: Optional[str] = None,
 ) -> dict:
     """
     Run the full LangGraph multi-agent workflow for a given query.
@@ -335,6 +293,8 @@ def run_workflow(
         query: Natural language query from the user.
         session_id: Optional session identifier (used by main.py for tracking).
         clarification_response: Optional user response to a prior clarification question.
+        pdf_source_file: Optional path to a clinical PDF to process alongside the query.
+            When set, the Extractor Node runs extract_pdf() and merges results into extractions.
 
     Returns:
         dict: Final AgentState as a plain dict, always includes 'final_response',
@@ -345,6 +305,9 @@ def run_workflow(
     """
     try:
         initial_state = create_initial_state(query)
+
+        if pdf_source_file and pdf_source_file.strip():
+            initial_state["pdf_source_file"] = pdf_source_file.strip()
 
         if clarification_response:
             initial_state = resume_from_clarification(initial_state, clarification_response)

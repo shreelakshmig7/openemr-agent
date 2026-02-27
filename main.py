@@ -20,18 +20,23 @@ Project: AgentForge — Healthcare RCM AI Agent
 """
 
 import os
+import re
 import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from dotenv import load_dotenv
+
+from fastapi import FastAPI, UploadFile, File, Query
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
 from langgraph_agent.workflow import run_workflow
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 from eval.run_eval import run_eval, DEFAULT_GOLDEN_DATA_PATH
+
+load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -40,6 +45,8 @@ SERVICE_NAME = "AgentForge Healthcare RCM AI Agent"
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "results")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 # ── In-memory session store ────────────────────────────────────────────────────
 # Keyed by session_id. Each value is the last AgentState dict returned by run_workflow.
@@ -61,6 +68,7 @@ class AskRequest(BaseModel):
     """Request body for POST /ask."""
     question: str
     session_id: Optional[str] = None
+    pdf_source_file: Optional[str] = None
 
 
 class AskResponse(BaseModel):
@@ -72,6 +80,8 @@ class AskResponse(BaseModel):
     confidence: float
     disclaimer: str
     tool_trace: list
+    denial_risk: dict
+    citation_anchors: list
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -87,6 +97,60 @@ def _get_session_id(session_id: Optional[str]) -> str:
         str: Valid session ID to use for this request.
     """
     return session_id if session_id else str(uuid.uuid4())
+
+
+def _query_contains_patient_identifier(question: str) -> bool:
+    """
+    Return True if the question contains a patient ID (P001-style) or
+    a two-word capitalized name. Used to decide whether to prepend
+    session context for follow-up questions.
+
+    Args:
+        question: Raw user question.
+
+    Returns:
+        bool: True if a patient identifier appears in the question.
+    """
+    if not question or not question.strip():
+        return False
+    if re.search(r"\b[Pp]\d{3,}\b", question):
+        return True
+    if re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", question.strip()):
+        return True
+    return False
+
+
+def _get_last_patient_from_state(prior_state: dict) -> Optional[str]:
+    """
+    Extract the last resolved patient name or ID from the prior workflow result.
+    Prefers extracted_patient_identifier.value (full name/ID from Step 0) so
+    prepend never uses a truncated first name; falls back to tool_trace.
+
+    Args:
+        prior_state: Last AgentState dict stored for this session.
+
+    Returns:
+        str | None: Patient identifier (e.g. "John Smith" or "P001"), or None.
+    """
+    try:
+        extracted = prior_state.get("extracted_patient_identifier") or {}
+        if isinstance(extracted, dict) and not extracted.get("ambiguous"):
+            val = extracted.get("value")
+            if val and isinstance(val, str) and val.strip():
+                return val.strip()
+    except Exception:
+        pass
+    try:
+        trace = prior_state.get("tool_trace") or []
+        for call in trace:
+            if call.get("tool") == "tool_get_patient_info":
+                inp = call.get("input")
+                if inp and isinstance(inp, str) and inp.strip():
+                    return inp.strip()
+                break
+    except Exception:
+        pass
+    return None
 
 
 def _load_latest_results(results_dir: str) -> Optional[dict]:
@@ -129,6 +193,33 @@ def root() -> HTMLResponse:
         return HTMLResponse(content=f.read())
 
 
+@app.get("/pdf")
+def serve_pdf(path: str = Query(..., description="Relative path to the PDF (uploads/ or mock_data/ only)")) -> FileResponse:
+    """
+    Serve a PDF file for the inline viewer. Only paths under uploads/ and
+    mock_data/ are allowed — all other paths return 404 to prevent path traversal.
+
+    Args:
+        path: Relative path to the PDF (e.g. "uploads/report.pdf").
+
+    Returns:
+        FileResponse: The PDF file with application/pdf content type.
+    """
+    base = os.path.dirname(os.path.abspath(__file__))
+    allowed_prefixes = (
+        os.path.join(base, "uploads"),
+        os.path.join(base, "mock_data"),
+    )
+    candidate = os.path.normpath(os.path.join(base, path))
+    if not any(candidate.startswith(p) for p in allowed_prefixes):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="PDF not found or access denied.")
+    if not os.path.isfile(candidate):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    return FileResponse(candidate, media_type="application/pdf")
+
+
 @app.get("/health")
 def health_check() -> dict:
     """
@@ -165,13 +256,21 @@ def ask(request: AskRequest) -> AskResponse:
     prior_state = _sessions.get(session_id)
 
     clarification_response = None
+    query_to_use = request.question
+
     if prior_state and prior_state.get("pending_user_input"):
         clarification_response = request.question
+    else:
+        if prior_state and not _query_contains_patient_identifier(request.question):
+            last_patient = _get_last_patient_from_state(prior_state)
+            if last_patient:
+                query_to_use = f"Regarding {last_patient}: {request.question}"
 
     result = run_workflow(
-        query=request.question,
+        query=query_to_use,
         session_id=session_id,
         clarification_response=clarification_response,
+        pdf_source_file=request.pdf_source_file,
     )
 
     _sessions[session_id] = result
@@ -189,7 +288,38 @@ def ask(request: AskRequest) -> AskResponse:
         confidence=confidence,
         disclaimer=disclaimer,
         tool_trace=result.get("tool_trace", []),
+        denial_risk=result.get("denial_risk") or {},
+        citation_anchors=result.get("citation_anchors") or [],
     )
+
+
+@app.post("/upload")
+async def upload_pdf(file: UploadFile = File(...)) -> dict:
+    """
+    Accept a PDF upload from the UI, save it to the uploads/ directory,
+    and return the server-side path for use in subsequent /ask requests.
+
+    Args:
+        file: Uploaded PDF file (multipart/form-data).
+
+    Returns:
+        dict: {"success": bool, "path": str, "filename": str, "error": str | None}
+
+    Raises:
+        Never — all failures return a structured error dict.
+    """
+    try:
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
+            return {"success": False, "path": "", "filename": "", "error": "Only PDF files are accepted."}
+        safe_name = re.sub(r"[^\w.\-]", "_", file.filename)
+        save_path = os.path.join(UPLOADS_DIR, safe_name)
+        contents = await file.read()
+        with open(save_path, "wb") as f:
+            f.write(contents)
+        relative_path = os.path.join("uploads", safe_name)
+        return {"success": True, "path": relative_path, "filename": safe_name, "error": None}
+    except Exception as e:
+        return {"success": False, "path": "", "filename": "", "error": str(e)}
 
 
 @app.post("/eval")
