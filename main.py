@@ -28,11 +28,11 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI, UploadFile, File, Query, Header, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
-from langgraph_agent.workflow import run_workflow
+from langgraph_agent.workflow import run_workflow, get_state_for_audit
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 from eval.run_eval import run_eval, DEFAULT_GOLDEN_DATA_PATH
 
@@ -68,6 +68,7 @@ class AskRequest(BaseModel):
     """Request body for POST /ask."""
     question: str
     session_id: Optional[str] = None
+    thread_id: Optional[str] = None  # Alias for session_id; frontend sends thread_id for New Case flow
     pdf_source_file: Optional[str] = None
     payer_id: Optional[str] = None
     procedure_code: Optional[str] = None
@@ -77,6 +78,7 @@ class AskResponse(BaseModel):
     """Response body for POST /ask."""
     answer: str
     session_id: str
+    thread_id: Optional[str] = None  # Echo of session_id for frontend (HIPAA New Case flow)
     timestamp: str
     escalate: bool
     confidence: float
@@ -250,15 +252,16 @@ def ask(request: AskRequest) -> AskResponse:
 
     If the session has a pending clarification (pending_user_input=True), the
     incoming question is treated as the clarification response and the workflow
-    is resumed from the Extractor Node.
+    is resumed from the Extractor Node. Uses thread_id or session_id from the
+    request so the frontend can send a consistent thread ID (e.g. from New Case).
 
     Args:
-        request: AskRequest with question and optional session_id.
+        request: AskRequest with question and optional thread_id/session_id.
 
     Returns:
-        AskResponse: answer, session_id, timestamp, escalate, confidence, disclaimer.
+        AskResponse: answer, session_id, thread_id, timestamp, escalate, confidence, disclaimer.
     """
-    session_id = _get_session_id(request.session_id)
+    session_id = _get_session_id(request.thread_id or request.session_id)
     prior_state = _sessions.get(session_id)
 
     clarification_response = None
@@ -295,6 +298,7 @@ def ask(request: AskRequest) -> AskResponse:
     return AskResponse(
         answer=answer,
         session_id=session_id,
+        thread_id=session_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
         escalate=escalate,
         confidence=confidence,
@@ -303,6 +307,55 @@ def ask(request: AskRequest) -> AskResponse:
         denial_risk=result.get("denial_risk") or {},
         citation_anchors=result.get("citation_anchors") or [],
     )
+
+
+@app.get("/api/audit/{thread_id}")
+def get_audit_trail(
+    thread_id: str,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+) -> dict:
+    """
+    Return the audit trail for a given thread (messages, extractions, tool calls, etc.).
+    Requires Bearer token matching AUDIT_TOKEN env var. Tries in-memory session store
+    first, then falls back to SQLite checkpointer (e.g. after server restart).
+
+    Args:
+        thread_id: Session/thread identifier.
+        authorization: Header "Authorization: Bearer <AUDIT_TOKEN>".
+
+    Returns:
+        dict: thread_id, messages, extractions, audit_results, confidence_score,
+              tool_call_history, ehr_confidence_penalty.
+
+    Raises:
+        HTTPException 403: Missing or invalid Authorization.
+        HTTPException 404: Thread not found.
+    """
+    audit_token = os.getenv("AUDIT_TOKEN", "").strip()
+    if not audit_token:
+        raise HTTPException(status_code=501, detail="Audit endpoint not configured (AUDIT_TOKEN not set).")
+    if not authorization or not authorization.strip().lower().startswith("bearer "):
+        raise HTTPException(status_code=403, detail="Unauthorized: missing or invalid Authorization header.")
+    token_value = authorization.strip()[7:].strip()  # after "Bearer "
+    if token_value != audit_token:
+        raise HTTPException(status_code=403, detail="Unauthorized.")
+
+    state = _sessions.get(thread_id)
+    if not state:
+        state = get_state_for_audit(thread_id)
+
+    if not state:
+        raise HTTPException(status_code=404, detail="Thread not found.")
+
+    return {
+        "thread_id": thread_id,
+        "messages": state.get("messages", []),
+        "extractions": state.get("extractions", []),
+        "audit_results": state.get("audit_results", []),
+        "confidence_score": state.get("confidence_score"),
+        "tool_call_history": state.get("tool_call_history", []),
+        "ehr_confidence_penalty": state.get("ehr_confidence_penalty", 0),
+    }
 
 
 @app.post("/upload")

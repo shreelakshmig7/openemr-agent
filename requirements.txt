@@ -24,12 +24,14 @@ langchain-core==0.3.83
 langchain-text-splitters==0.3.11
 langgraph==0.6.11
 langgraph-checkpoint==2.1.2
+langgraph-checkpoint-sqlite==2.0.4
 langgraph-prebuilt==0.6.5
 langgraph-sdk==0.2.9
 langsmith==0.4.37
 orjson==3.11.5
 ormsgpack==1.11.0
 packaging==25.0
+pinecone>=5.0.0
 pluggy==1.6.0
 pydantic==2.12.5
 pydantic_core==2.41.5
@@ -49,6 +51,7 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.3
 uuid_utils==0.14.1
+voyageai>=0.2.0
 python-multipart==0.0.20
 unstructured-client==0.42.10
 uvicorn==0.39.0

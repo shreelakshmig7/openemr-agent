@@ -39,7 +39,10 @@ Project: AgentForge — Healthcare RCM AI Agent
 import os
 from typing import Any, Optional
 
-from langchain.callbacks.tracers import LangChainTracer
+try:
+    from langchain.callbacks.tracers import LangChainTracer
+except ImportError:
+    LangChainTracer = None  # optional: run without LangSmith when langchain not installed
 from langgraph.graph import StateGraph, END
 
 from langgraph_agent.state import AgentState, create_initial_state
@@ -368,6 +371,32 @@ def _build_graph(checkpointer: Optional[Any] = None):
     return graph.compile(checkpointer=checkpointer)
 
 
+def get_state_for_audit(thread_id: str) -> Optional[dict]:
+    """
+    Retrieve persisted state for a thread from the SQLite checkpointer.
+    Used by GET /api/audit/{thread_id} when the in-memory session store does not
+    have the state (e.g. after server restart).
+
+    Args:
+        thread_id: Session/thread identifier used as thread_id in checkpointer config.
+
+    Returns:
+        dict | None: AgentState as a plain dict, or None if not found or on error.
+    """
+    try:
+        checkpointer = _get_checkpointer()
+        if not checkpointer or not thread_id:
+            return None
+        graph = _build_graph(checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = graph.get_state(config)
+        if snapshot and getattr(snapshot, "values", None):
+            return dict(snapshot.values)
+        return None
+    except Exception:
+        return None
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def run_workflow(
@@ -473,7 +502,7 @@ def run_workflow(
             invoke_config["configurable"] = {"thread_id": session_id}
 
         # LangSmith tracing when API key is set — node-level spans with latency per hop.
-        if os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"):
+        if LangChainTracer and (os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")):
             try:
                 tracer = LangChainTracer(project_name="agentforge-rcm")
                 invoke_config["callbacks"] = [tracer]

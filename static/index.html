@@ -32,6 +32,19 @@
     header .icon { font-size: 28px; }
     header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
     header p  { font-size: 12px; opacity: 0.85; margin-top: 2px; }
+    header .header-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    #new-case-btn {
+      background: rgba(255,255,255,0.2);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.4);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #new-case-btn:hover { background: rgba(255,255,255,0.3); border-color: rgba(255,255,255,0.6); }
 
     /* ── Main split area ── */
     #main-area {
@@ -461,6 +474,9 @@
     <h1>AgentForge — Healthcare AI</h1>
     <p>Medication safety review powered by AI · Built on OpenEMR</p>
   </div>
+  <div class="header-actions">
+    <button id="new-case-btn" type="button" onclick="handleNewCase()" title="Purge session context for HIPAA compliance">New Case</button>
+  </div>
 </header>
 
 <div id="main-area">
@@ -512,7 +528,37 @@
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-  let sessionId       = null;
+  function generateThreadId() {
+    return 'case_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  }
+
+  let threadId = generateThreadId();
+
+  function handleNewCase() {
+    threadId = generateThreadId();
+    attachedPdfPath = null;
+    pdfDoc = null;
+    currentPdfPath = null;
+    if (activePill) { activePill.classList.remove('active'); activePill = null; }
+    pdfBadge.style.display = 'none';
+    pdfBadgeName.textContent = '';
+    closePdfPane();
+    // Reset chat to welcome state
+    chat.innerHTML = `
+      <div class="welcome">
+        <h2>What can I help you with?</h2>
+        <p>Ask me about patient medications, drug interactions, or allergy conflicts. Attach a clinical PDF to unlock inline citations — click any 📄 tag to jump to the exact page.</p>
+        <div class="chips">
+          <button class="chip" onclick="sendChip(this)">💊 What medications is John Smith on?</button>
+          <button class="chip" onclick="sendChip(this)">⚠️ Check drug interactions for Mary Johnson</button>
+          <button class="chip" onclick="sendChip(this)">🚨 Is it safe to give Robert Davis Aspirin?</button>
+          <button class="chip" onclick="sendChip(this)">🩺 Does John Smith have any known allergies?</button>
+          <button class="chip" onclick="sendChip(this)">🚨 Is it safe to give Emily Rodriguez Amoxicillin?</button>
+        </div>
+      </div>`;
+    console.info('[HIPAA] Session purged. New thread: ' + threadId);
+  }
+
   let attachedPdfPath = null;
   let pdfDoc          = null;   // loaded pdf.js document
   let currentPdfPath  = null;   // path of currently loaded PDF
@@ -794,9 +840,8 @@
     const typing = appendTyping();
 
     try {
-      const body = { question: text };
-      if (sessionId) body.session_id = sessionId;
-      if (pdfUsed)   body.pdf_source_file = pdfUsed;
+      const body = { question: text, thread_id: threadId };
+      if (pdfUsed) body.pdf_source_file = pdfUsed;
 
       const res = await fetch('/ask', {
         method: 'POST',
@@ -810,7 +855,7 @@
         appendErrorMessage('The server returned an error. Please try again.');
       } else {
         const data = await res.json();
-        sessionId = data.session_id;
+        threadId = data.thread_id || data.session_id || threadId;
         appendAgentMessage(data);
       }
     } catch (err) {

@@ -9,9 +9,11 @@
 
 ## What It Does
 
-A healthcare AI agent that helps clinical staff review patient medication histories and flag dangerous drug interactions. Accepts natural language queries, calls tools to fetch real data from a mock patient database, and always cites its source — never answers from memory.
+A healthcare RCM (Revenue Cycle Management) AI agent that helps clinical staff review patient medication histories, check payer policy criteria, and flag denial risk. It accepts natural language queries, runs a LangGraph pipeline (router → orchestrator → extractor → auditor), and calls tools against mock (or real) data. Responses are cited and never from memory.
 
-**Tech stack:** FastAPI · LangChain · Claude Sonnet (Anthropic) · LangSmith observability
+**Features:** Patient/medication lookup · Drug interaction & allergy checks · PDF extraction (clinical notes) · Payer policy search (Pinecone or mock) · Denial risk analysis · Multi-turn with clarification
+
+**Tech stack:** FastAPI · LangGraph · LangChain · Claude (Anthropic) · LangSmith observability
 
 ---
 
@@ -30,7 +32,7 @@ pip install -r requirements.txt
 
 # 4. Add your API keys
 cp .env.example .env
-# Edit .env — add ANTHROPIC_API_KEY and LANGSMITH_API_KEY
+# Edit .env — add ANTHROPIC_API_KEY, UNSTRUCTURED_API_KEY (for PDFs), and optionally LANGSMITH_API_KEY
 
 # 5. Run the server
 uvicorn main:app --reload --port 8000
@@ -137,6 +139,10 @@ Try these in the live chat UI or via the API:
 "Tell me about David Kim"
 → "Does he have any drug interactions?"   ← agent must re-call tools, not answer from memory
 
+# Policy search (use request body with payer_id + procedure_code for policy_search)
+"Does John Smith meet Cigna criteria for knee replacement?"
+"Does John Smith meet BlueCross criteria for knee replacement?"  ← unknown payer → no-policy message
+
 # Edge cases
 "What medications is Alex Turner on?"     ← no record found
 "What meds does Maria Santos take?"       ← empty record
@@ -148,12 +154,12 @@ Try these in the live chat UI or via the API:
 ## API Reference
 
 ### `GET /`
-Opens the web chat UI.
+Serves the web chat UI.
 
 ### `GET /health`
 Returns server status.
 ```json
-{"status": "ok", "version": "1.0.0"}
+{"service": "AgentForge Healthcare RCM AI Agent", "version": "2.0.0", "status": "ok", "timestamp": "2025-02-27T12:00:00.000000Z"}
 ```
 
 ### `POST /ask`
@@ -161,7 +167,11 @@ Send a question to the agent.
 ```json
 {
   "question": "What medications is John Smith taking?",
-  "session_id": "optional-uuid-for-multi-turn"
+  "session_id": "optional-uuid-for-multi-turn",
+  "thread_id": "optional-same-as-session_id",
+  "pdf_source_file": "optional-path-e.g-uploads/note.pdf",
+  "payer_id": "optional-e.g-cigna",
+  "procedure_code": "optional-e.g-27447"
 }
 ```
 Response:
@@ -169,21 +179,31 @@ Response:
 {
   "answer": "John Smith is currently taking...",
   "session_id": "uuid",
+  "thread_id": "uuid",
+  "timestamp": "2025-02-27T12:00:00.000000Z",
+  "escalate": false,
   "confidence": 0.9,
-  "requires_human_review": false,
   "disclaimer": "...",
-  "tool_trace": [
-    {"tool": "tool_get_patient_info", "input": {"name_or_id": "John Smith"}, "output": {...}},
-    {"tool": "tool_get_medications", "input": {"patient_id": "P001"}, "output": {...}}
-  ]
+  "tool_trace": [...],
+  "denial_risk": {"risk_level": "NONE", "matched_patterns": [], ...},
+  "citation_anchors": []
 }
 ```
 
+### `POST /upload`
+Upload a PDF (multipart/form-data). Returns `{ "success": true, "path": "uploads/filename.pdf", "filename": "..." }` for use as `pdf_source_file` in `POST /ask`.
+
+### `GET /pdf`
+Serve an uploaded PDF by path (query param or path). Used by the UI to display documents.
+
+### `GET /api/audit/{thread_id}`
+Return audit trail for a thread (messages, extractions, tool_call_history). Requires header `Authorization: Bearer <AUDIT_TOKEN>`. Set `AUDIT_TOKEN` in env to enable.
+
 ### `POST /eval`
-Run the automated evaluation suite against all golden test cases.
+Run the automated evaluation suite against all golden test cases. Requires `ANTHROPIC_API_KEY`.
 
 ### `GET /eval/results`
-Retrieve the most recent evaluation results.
+Retrieve the most recent evaluation results (from `tests/results/`).
 
 ---
 
@@ -192,19 +212,24 @@ Retrieve the most recent evaluation results.
 ### Unit tests (no API key needed)
 ```bash
 source venv/bin/activate
-python -m pytest tests/test_tools.py tests/test_verification.py tests/test_eval.py tests/test_main.py -v
+python -m pytest tests/test_tools.py tests/test_verification.py tests/test_denial_analyzer.py tests/test_pdf_extractor.py tests/test_langgraph_state.py tests/test_eval.py tests/test_main.py -v
 ```
 
-### Conversation tests (requires ANTHROPIC_API_KEY)
+### LangGraph / orchestrator tests (no API key for most)
 ```bash
-python -m pytest tests/test_conversation.py -v
+python -m pytest tests/test_langgraph_orchestrator.py tests/test_langgraph_extractor.py tests/test_langgraph_workflow.py tests/test_langgraph_clarification.py tests/test_langgraph_auditor.py -v
 ```
 
-### Full evaluation suite (requires ANTHROPIC_API_KEY + running server)
+### Conversation / agent tests (requires ANTHROPIC_API_KEY)
+```bash
+python -m pytest tests/test_conversation.py tests/test_agent.py -v
+```
+
+### Full evaluation suite (requires ANTHROPIC_API_KEY)
 ```bash
 python eval/run_eval.py
 ```
-Results are saved to `tests/results/`.
+Runs all cases in `eval/golden_data.yaml` (35 test cases). Results are saved to `tests/results/`.
 
 ---
 
@@ -212,23 +237,43 @@ Results are saved to `tests/results/`.
 
 ```
 openemr-agent/
-├── main.py              # FastAPI server + API endpoints
-├── agent.py             # LangChain agent + system prompt
-├── conversation.py      # Multi-turn conversation management
-├── tools.py             # Tool implementations (patient, meds, interactions)
-├── verification.py      # Domain safety checks (allergy, confidence, FDA)
+├── main.py                 # FastAPI server + API endpoints
+├── Procfile                 # Railway: uvicorn main:app --host 0.0.0.0 --port $PORT
+├── verification.py         # Allergy, confidence, FDA checks
+├── healthcare_guidelines.py # Clinical safety rules
+├── denial_analyzer.py       # Denial risk pattern matching
+├── pdf_extractor.py         # PDF extraction (unstructured.io)
+├── tools/                   # Tool implementations (package)
+│   ├── __init__.py         # get_patient_info, get_medications, check_drug_interactions
+│   └── policy_search.py    # Payer policy search (Pinecone or mock)
+├── langgraph_agent/         # LangGraph state machine
+│   ├── state.py            # AgentState, create_initial_state
+│   ├── workflow.py         # run_workflow, graph build
+│   ├── router_node.py      # Intent classification
+│   ├── orchestrator_node.py# Tool plan, patient name extraction
+│   ├── extractor_node.py   # Tool execution (patient, meds, PDF, policy, denial)
+│   ├── auditor_node.py     # Verification, response synthesis
+│   └── clarification_node.py
 ├── mock_data/
-│   ├── patients.json    # 11 mock patients
-│   ├── medications.json # Medication records per patient
-│   └── interactions.json# Drug interaction rules
+│   ├── patients.json       # Mock patients
+│   ├── medications.json   # Medication records
+│   ├── interactions.json  # Drug interaction rules
+│   ├── denial_patterns.json
+│   └── payer_policies_raw.py  # Raw policy chunks (Pinecone upsert / mock)
+├── scripts/
+│   ├── create_pinecone_index.py  # Create Pinecone index (voyage-2, 1024 dims)
+│   └── upsert_policies.py        # Embed + upsert policy chunks to Pinecone
 ├── eval/
-│   ├── golden_data.yaml # 18 evaluation test cases
-│   └── run_eval.py      # Evaluation runner
+│   ├── golden_data.yaml    # Evaluation test cases (35 cases)
+│   └── run_eval.py         # Evaluation runner
 ├── static/
-│   └── index.html       # Web chat UI
+│   └── index.html          # Web chat UI
+├── legacy/                  # Legacy LangChain agent (optional)
+│   ├── agent.py
+│   └── conversation.py
 └── tests/
     ├── test_tools.py
-    ├── test_conversation.py
+    ├── test_langgraph_*.py
     ├── test_verification.py
     ├── test_eval.py
     └── test_main.py
