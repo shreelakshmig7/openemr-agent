@@ -214,6 +214,7 @@ def _synthesize_response(
     allergy_conflict: Optional[dict],
     denial_risk: Optional[dict],
     checked_sources_str: str = "",
+    ehr_unavailable: bool = False,
 ) -> Optional[str]:
     """
     Use Claude Sonnet to synthesize a structured clinical response from validated extractions.
@@ -228,6 +229,10 @@ def _synthesize_response(
         checked_sources_str: Comma-separated list of source paths actually checked this
             query (e.g. "mock_data/patients.json, mock_data/medications.json"). Injected
             into the SOURCE_INTEGRITY hard rule to prevent fabricated absence claims.
+        ehr_unavailable: True when patient was not found in EHR and PDF is the sole
+            source of truth (Scenario A). When True, the SAFETY_CHECK "no conflict"
+            preamble rule is bypassed and the model is directed to answer directly
+            from the PDF facts without assuming absence.
 
     Returns:
         str: Synthesized clinical response, or None if synthesis fails.
@@ -256,15 +261,31 @@ def _synthesize_response(
                 f"Matched patterns: {', '.join(p.get('code', '') for p in denial_risk.get('matched_patterns', []))}."
             )
 
+        if ehr_unavailable:
+            instruction = (
+                "EHR records are UNAVAILABLE for this patient. "
+                "The PDF content below is the ONLY source of truth. "
+                "Search ALL pages of the PDF facts exhaustively to answer the question. "
+                "If the PDF contains any mention of drug interactions, contraindications, "
+                "CONTRAINDICATED drug pairs, or conflict warnings — report them verbatim. "
+                "Do NOT assume absence of information. Do NOT use a 'no conflict found' "
+                "conclusion unless you have read every fact below and found nothing. "
+                "Quote the exact text from the PDF that answers the question."
+            )
+        else:
+            instruction = (
+                "Find the SPECIFIC answer to the question above within "
+                "the clinical facts below. Quote the relevant text that answers it. "
+                "If the answer appears anywhere — including in historical records, "
+                "completed treatment summaries, assessment sections, or inline code "
+                "mentions (e.g. ICD-10, CPT codes) — extract and report it directly. "
+                "Do not summarize the document generally; answer the specific question."
+            )
+
         user_content = (
             f"QUESTION TO ANSWER: {query}\n"
             f"Intent: {query_intent}\n"
-            f"\nINSTRUCTION: Find the SPECIFIC answer to the question above within "
-            f"the clinical facts below. Quote the relevant text that answers it. "
-            f"If the answer appears anywhere — including in historical records, "
-            f"completed treatment summaries, assessment sections, or inline code "
-            f"mentions (e.g. ICD-10, CPT codes) — extract and report it directly. "
-            f"Do not summarize the document generally; answer the specific question."
+            f"\nINSTRUCTION: {instruction}"
             f"{conflict_info}"
             f"{denial_info}\n\n"
             f"Clinical facts to search:\n{facts}"

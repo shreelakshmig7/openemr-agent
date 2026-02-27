@@ -11,7 +11,7 @@
 
 A healthcare RCM (Revenue Cycle Management) AI agent that helps clinical staff review patient medication histories, check payer policy criteria, and flag denial risk. It accepts natural language queries, runs a LangGraph pipeline (router → orchestrator → extractor → auditor), and calls tools against mock (or real) data. Responses are cited and never from memory.
 
-**Features:** Patient/medication lookup · Drug interaction & allergy checks · PDF extraction (clinical notes) · Payer policy search (Pinecone or mock) · Denial risk analysis · Multi-turn with clarification
+**Features:** Patient/medication lookup · Drug interaction & allergy checks · PDF extraction (clinical notes) · Payer policy search (Pinecone or mock; unknown payers get an explicit “no policy criteria found” message) · Denial risk analysis · Multi-turn with clarification
 
 **Tech stack:** FastAPI · LangGraph · LangChain · Claude (Anthropic) · LangSmith observability
 
@@ -63,6 +63,7 @@ In the Railway project → **Variables**, add (no `.env` file is deployed):
 | `PINECONE_INDEX` | No | e.g. `agentforge-rcm-policies` |
 | `VOYAGE_API_KEY` | No | Only if using real Pinecone (embeddings) |
 | `USE_REAL_PINECONE` | No | Set to `true` for Pinecone; omit or `false` for mock policy search |
+| `AUDIT_TOKEN` | No | Bearer token for `GET /api/audit/{thread_id}`; omit to disable audit endpoint |
 
 \* Without `UNSTRUCTURED_API_KEY`, PDF extraction will fail; the rest of the agent still works.
 
@@ -139,9 +140,10 @@ Try these in the live chat UI or via the API:
 "Tell me about David Kim"
 → "Does he have any drug interactions?"   ← agent must re-call tools, not answer from memory
 
-# Policy search (use request body with payer_id + procedure_code for policy_search)
+# Policy search (pass payer_id + procedure_code in request body for policy_search)
 "Does John Smith meet Cigna criteria for knee replacement?"
-"Does John Smith meet BlueCross criteria for knee replacement?"  ← unknown payer → no-policy message
+"Does John Smith meet BlueCross criteria for knee replacement?"
+  ← unknown payer → explicit message: "No policy criteria found... not available in the current policy database."
 
 # Edge cases
 "What medications is Alex Turner on?"     ← no record found
@@ -193,11 +195,11 @@ Response:
 ### `POST /upload`
 Upload a PDF (multipart/form-data). Returns `{ "success": true, "path": "uploads/filename.pdf", "filename": "..." }` for use as `pdf_source_file` in `POST /ask`.
 
-### `GET /pdf`
-Serve an uploaded PDF by path (query param or path). Used by the UI to display documents.
+### `GET /pdf?path=...`
+Serve a PDF by relative path. Example: `GET /pdf?path=uploads/report.pdf`. Only paths under `uploads/` or `mock_data/` are allowed. Used by the UI to display documents.
 
 ### `GET /api/audit/{thread_id}`
-Return audit trail for a thread (messages, extractions, tool_call_history). Requires header `Authorization: Bearer <AUDIT_TOKEN>`. Set `AUDIT_TOKEN` in env to enable.
+Return audit trail for a thread (messages, extractions, tool_call_history). Requires header `Authorization: Bearer <token>`. Set `AUDIT_TOKEN` in env to the same value to enable; if unset, the endpoint returns 501.
 
 ### `POST /eval`
 Run the automated evaluation suite against all golden test cases. Requires `ANTHROPIC_API_KEY`.
@@ -268,15 +270,25 @@ openemr-agent/
 │   └── run_eval.py         # Evaluation runner
 ├── static/
 │   └── index.html          # Web chat UI
+├── docs/                    # Design and reference docs
 ├── legacy/                  # Legacy LangChain agent (optional)
 │   ├── agent.py
 │   └── conversation.py
 └── tests/
     ├── test_tools.py
-    ├── test_langgraph_*.py
     ├── test_verification.py
+    ├── test_denial_analyzer.py
+    ├── test_pdf_extractor.py
+    ├── test_langgraph_state.py
+    ├── test_langgraph_orchestrator.py
+    ├── test_langgraph_extractor.py
+    ├── test_langgraph_workflow.py
+    ├── test_langgraph_clarification.py
+    ├── test_langgraph_auditor.py
     ├── test_eval.py
-    └── test_main.py
+    ├── test_main.py
+    ├── test_conversation.py
+    └── test_agent.py
 ```
 
 ---

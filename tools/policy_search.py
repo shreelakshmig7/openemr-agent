@@ -176,7 +176,12 @@ def _search_pinecone(
                 "payer": payer_id,
                 "procedure_code": procedure_code,
                 "source": "pinecone",
-                "message": f"No policy found for payer '{payer_id}'",
+                "no_policy_found": True,
+                "message": (
+                    f"No policy criteria found for payer '{payer_id}'. "
+                    f"Authorization criteria for {payer_id.title()} are not available "
+                    f"in the current policy database."
+                ),
                 "error": None,
             }
 
@@ -257,7 +262,12 @@ def _search_mock(
                 "payer": payer_id,
                 "procedure_code": procedure_code,
                 "source": "mock",
-                "message": f"No mock policy for payer '{payer_id}'",
+                "no_policy_found": True,
+                "message": (
+                    f"No policy criteria found for payer '{payer_id}'. "
+                    f"Authorization criteria for {payer_id.title()} are not available "
+                    f"in the current policy database."
+                ),
                 "error": None,
             }
 

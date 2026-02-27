@@ -228,6 +228,10 @@ def _output_node(state: AgentState) -> AgentState:
         state["citation_anchors"] = citation_anchors
 
         # ── Gate 3: synthesize with SOURCE_INTEGRITY hard rule injected ────
+        # ehr_unavailable=True when Scenario A fired (patient not in EHR, PDF is
+        # the sole source of truth). Directs synthesis to answer from PDF facts
+        # instead of applying the EHR-gated SAFETY_CHECK "no conflict" template.
+        ehr_unavailable = state.get("ehr_confidence_penalty", 0) > 0
         synthesized = _synthesize_response(
             query=state.get("input_query", ""),
             query_intent=query_intent,
@@ -235,6 +239,7 @@ def _output_node(state: AgentState) -> AgentState:
             allergy_conflict=state.get("allergy_conflict_result"),
             denial_risk=state.get("denial_risk"),
             checked_sources_str=checked_sources_str,
+            ehr_unavailable=ehr_unavailable,
         )
         if synthesized:
             body = synthesized

@@ -8,3 +8,5 @@ __pycache__/
 .venv/
 uploads/
 agent_checkpoints.sqlite
+tests/results/*.json
+tests/results/*.txt
