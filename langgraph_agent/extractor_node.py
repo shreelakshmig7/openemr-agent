@@ -3,10 +3,14 @@ extractor_node.py
 -----------------
 AgentForge — Healthcare RCM AI Agent — LangGraph Extractor Node
 ---------------------------------------------------------------
-Implements the Extractor Node in the LangGraph state machine. Step 0 uses
-Haiku to extract the patient identifier from the query (semantic extraction).
-Then calls tools in sequence and formats results with verbatim citations.
-No regex for patient extraction — LLM handles all phrasing.
+Implements the Extractor Node in the LangGraph state machine. When the
+Orchestrator Node has run, patient name extraction is read from
+state["identified_patient_name"] — no Step 0 Haiku call is made. This halves
+API calls per request and eliminates the 529-overloaded regression where the
+second Haiku call failed after the Orchestrator's first call succeeded.
+
+Step 0 (_extract_patient_identifier_llm) is retained only for the legacy path:
+when orchestrator_ran=False (direct unit tests, old callers).
 
 Tool call order:
     1. tool_get_patient_info — resolves patient identifier to structured record.
@@ -16,8 +20,10 @@ Tool call order:
     5. analyze_denial_risk — scores all extractions against historical denial patterns.
 
 Key functions:
-    extractor_node: Main node function — Step 0 (Haiku) then tools.
+    extractor_node: Main node function — reads identified_patient_name (orchestrated)
+        or runs Step 0 (legacy), then calls tools in sequence.
     _extract_patient_identifier_llm: Step 0 — Haiku returns JSON (type, value, ambiguous).
+        Only called when orchestrator_ran=False.
     _stub_pii_scrubber: Strips HIPAA fields from text before LLM/tool calls.
     _format_extractions: Converts tool results to cited extraction dicts.
 
@@ -25,11 +31,13 @@ Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
 """
 
+import hashlib
 import json
 import logging
 import os
 import re
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +47,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from tools import get_patient_info as tool_get_patient_info
 from tools import get_medications as tool_get_medications
 from tools import check_drug_interactions as tool_check_drug_interactions
+from tools.policy_search import search_policy as tool_search_policy
 from pdf_extractor import extract_pdf as tool_extract_pdf
 from denial_analyzer import analyze_denial_risk as tool_analyze_denial_risk
 from verification import check_allergy_conflict
@@ -265,13 +274,54 @@ def _format_extractions(patient: dict, medications: List[dict], interactions: Li
         return []
 
 
+# ── PDF content-hash cache ────────────────────────────────────────────────────
+
+def _get_pdf_content_hash(pdf_path: str) -> str:
+    """
+    Compute the MD5 hex digest of a PDF file's raw bytes.
+
+    Hashes file content (not path) so that two different files uploaded to the
+    same path are not incorrectly treated as identical. Used by the Extractor to
+    validate the Layer 2 PDF cache before skipping pdf_extractor.
+
+    Args:
+        pdf_path: Filesystem path to the PDF file.
+
+    Returns:
+        str: MD5 hex digest, or empty string if the file cannot be read.
+
+    Raises:
+        Never — returns empty string on any I/O failure.
+    """
+    try:
+        with open(pdf_path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except Exception:
+        return ""
+
+
 # ── Extractor Node ────────────────────────────────────────────────────────────
 
 def extractor_node(state: AgentState) -> AgentState:
     """
     Extractor Node — calls tools in sequence and populates state.extractions[].
-    Runs PII scrubber on input before any processing. Does not make routing
-    decisions — that is the Auditor's responsibility.
+
+    When the Orchestrator has run (orchestrator_ran=True), executes only the
+    tools listed in state["tool_plan"] in order. If tool_plan is empty and the
+    Orchestrator ran, this is a general knowledge query — all tools are skipped
+    and the node passes through to the Auditor immediately.
+
+    When the Orchestrator has not run (orchestrator_ran=False, e.g. in direct
+    tests), falls back to the original behavior: all EHR tools are called.
+
+    Layer 2 cache writes:
+        - extracted_patient: written after a successful patient_lookup.
+        - extracted_pdf_pages / extracted_pdf_hash: written after pdf_extractor
+          runs. Hash is derived from file content bytes, not path.
+
+    Layer 1 memory write:
+        - prior_query_context: updated at the end of every run with the
+          resolved patient name/ID and intent, for the next turn's Orchestrator.
 
     Args:
         state: Current AgentState from the LangGraph graph.
@@ -288,100 +338,175 @@ def extractor_node(state: AgentState) -> AgentState:
         if state.get("clarification_response"):
             clean_query = f"{clean_query} {_stub_pii_scrubber(state['clarification_response'])}"
 
-        # Step 0 — Haiku extracts patient identifier (no regex)
-        extracted = _extract_patient_identifier_llm(clean_query)
-        state["extracted_patient_identifier"] = extracted
+        tool_trace = list(state.get("tool_trace") or [])
+        tool_call_history = list(state.get("tool_call_history") or [])
+        _ts = datetime.now(timezone.utc).isoformat()
 
-        if extracted.get("ambiguous") or extracted.get("type") == "none":
-            reason = extracted.get("reason") or "No patient identifier found."
-            state["clarification_needed"] = f"Which patient are you referring to? ({reason})"
-            state["pending_user_input"] = True
+        # ── General knowledge bypass ──────────────────────────────────────────
+        # Use is_general_knowledge (set explicitly by Orchestrator) — NOT tool_plan=[],
+        # which is also empty for patient cache-hit paths and would incorrectly bypass
+        # them. is_general_knowledge=True is the unambiguous signal for bypass.
+        orchestrator_ran = state.get("orchestrator_ran", False)
+        tool_plan = state.get("tool_plan") or []
+        if state.get("is_general_knowledge", False):
+            logger.info("Extractor: general knowledge query — skipping all tools.")
             state["extractions"] = []
-            state["tool_trace"] = []
+            state["documents_processed"] = []
+            state["denial_risk"] = {
+                "success": True,
+                "risk_level": "NONE",
+                "matched_patterns": [],
+                "recommendations": [],
+                "denial_risk_score": 0.0,
+                "source": "none",
+                "error": None,
+            }
+            state["tool_trace"] = tool_trace
+            state["tool_call_history"] = tool_call_history
             return state
 
-        patient_identifier = (extracted.get("value") or "").strip()
-        if not patient_identifier:
-            state["clarification_needed"] = "Which patient are you referring to? Please provide a full name or patient ID."
-            state["pending_user_input"] = True
-            state["extractions"] = []
-            state["tool_trace"] = []
-            return state
+        # ── Patient cache check ───────────────────────────────────────────────
+        # If Orchestrator already cached the patient this session, skip Step 0
+        # and patient_lookup — use the cached record directly.
+        cached_patient = state.get("extracted_patient") or {}
+        use_patient_cache = (
+            orchestrator_ran
+            and "patient_lookup" not in tool_plan
+            and bool(cached_patient)
+        )
 
-        tool_trace = []
+        patient = None
+        patient_id = None
+        patient_identifier = ""
+        ehr_gap_extractions: List[dict] = []
+        patient_result: Optional[dict] = None
 
-        patient_result = tool_get_patient_info(patient_identifier)
-        tool_trace.append({
-            "tool": "tool_get_patient_info",
-            "input": patient_identifier,
-            "output": patient_result,
-        })
-
-        if not patient_result.get("success"):
-            pdf_source_file_check = (state.get("pdf_source_file") or "").strip()
-            if not pdf_source_file_check:
-                # Scenario B — no PDF and patient not found: hard stop.
-                # Route to clarification so the user gets a clean actionable message.
+        if use_patient_cache:
+            # Layer 2 cache hit — patient already resolved this session.
+            patient = cached_patient
+            patient_id = patient.get("id", "")
+            patient_identifier = patient.get("name", patient_id)
+            logger.info("Extractor: patient cache hit — using cached record for '%s'", patient_identifier)
+        elif orchestrator_ran:
+            # Orchestrator already ran a single Haiku call that extracted the patient
+            # name alongside intent classification — read from state, skip Step 0.
+            patient_identifier = (state.get("identified_patient_name") or "").strip()
+            if not patient_identifier:
                 state["clarification_needed"] = (
-                    f"Patient not found: {patient_result.get('error', 'Unknown error')}. "
-                    "Please verify the patient name or ID, or attach a clinical PDF."
+                    "Which patient are you referring to? "
+                    "(no patient name found in your query)"
                 )
                 state["pending_user_input"] = True
                 state["extractions"] = []
                 state["tool_trace"] = tool_trace
+                state["tool_call_history"] = tool_call_history
                 return state
 
-            # Scenario A — PDF provided but patient not in EHR.
-            # Do NOT early return. Add synthetic gap extractions, apply confidence
-            # penalty, and continue to PDF extraction below.
-            logger.warning(
-                "Patient '%s' not found in EHR — proceeding from PDF only (Scenario A).",
-                patient_identifier,
-            )
-            ehr_gap_extractions = [
-                {
-                    "claim": (
-                        "Allergy status could not be verified — no EHR record found for this patient. "
-                        "Manual allergy verification required before proceeding."
-                    ),
-                    "citation": "EHR_UNAVAILABLE",
-                    "source": "EHR_UNAVAILABLE",
-                    "verbatim": True,
-                    "synthetic": True,
-                    "flag": "NO_EHR_ALLERGY_DATA",
-                },
-                {
-                    "claim": (
-                        "Medication list could not be retrieved from EHR — no patient record found. "
-                        "Drug interaction check is incomplete."
-                    ),
-                    "citation": "EHR_UNAVAILABLE",
-                    "source": "EHR_UNAVAILABLE",
-                    "verbatim": True,
-                    "synthetic": True,
-                    "flag": "NO_EHR_MEDICATION_DATA",
-                },
-            ]
+            patient_result = tool_get_patient_info(patient_identifier)
             tool_trace.append({
-                "tool": "ehr_gap_check",
+                "tool": "tool_get_patient_info",
                 "input": patient_identifier,
-                "output": {
-                    "patient_found": False,
-                    "pdf_fallback": True,
-                    "penalty": 45,
-                    "flags": ["NO_EHR_ALLERGY_DATA", "NO_EHR_MEDICATION_DATA"],
-                },
+                "output": patient_result,
             })
-            state["ehr_confidence_penalty"] = 45
-            # Continue pipeline — PDF extraction runs below.
-            # Pass sentinel values: patient=None skips EHR-based tool calls.
-            patient = None
-            patient_id = None
+            tool_call_history.append({"tool": "patient_lookup", "status": "success" if patient_result.get("success") else "miss", "ts": _ts})
         else:
-            patient = patient_result["patient"]
-            patient_id = patient["id"]
+            # Legacy path: Orchestrator has not run (direct unit tests or old callers).
+            # Fall back to Step 0 — Haiku extracts patient identifier independently.
+            extracted = _extract_patient_identifier_llm(clean_query)
+            state["extracted_patient_identifier"] = extracted
 
-        # ── EHR tool suite — only runs when patient was found in the database ────
+            if extracted.get("ambiguous") or extracted.get("type") == "none":
+                reason = extracted.get("reason") or "No patient identifier found."
+                state["clarification_needed"] = f"Which patient are you referring to? ({reason})"
+                state["pending_user_input"] = True
+                state["extractions"] = []
+                state["tool_trace"] = tool_trace
+                state["tool_call_history"] = tool_call_history
+                return state
+
+            patient_identifier = (extracted.get("value") or "").strip()
+            if not patient_identifier:
+                state["clarification_needed"] = "Which patient are you referring to? Please provide a full name or patient ID."
+                state["pending_user_input"] = True
+                state["extractions"] = []
+                state["tool_trace"] = tool_trace
+                state["tool_call_history"] = tool_call_history
+                return state
+
+            patient_result = tool_get_patient_info(patient_identifier)
+            tool_trace.append({
+                "tool": "tool_get_patient_info",
+                "input": patient_identifier,
+                "output": patient_result,
+            })
+            tool_call_history.append({"tool": "patient_lookup", "status": "success" if patient_result.get("success") else "miss", "ts": _ts})
+
+        # ── Patient lookup result handling (shared by orchestrator and legacy paths) ─
+        # use_patient_cache skips this block — patient is already resolved above.
+        if patient_result is not None:
+            if not patient_result.get("success"):
+                pdf_source_file_check = (state.get("pdf_source_file") or "").strip()
+                if not pdf_source_file_check:
+                    # Scenario B — no PDF and patient not found: hard stop.
+                    state["clarification_needed"] = (
+                        f"Patient not found: {patient_result.get('error', 'Unknown error')}. "
+                        "Please verify the patient name or ID, or attach a clinical PDF."
+                    )
+                    state["pending_user_input"] = True
+                    state["extractions"] = []
+                    state["tool_trace"] = tool_trace
+                    state["tool_call_history"] = tool_call_history
+                    return state
+
+                # Scenario A — PDF provided but patient not in EHR.
+                logger.warning(
+                    "Patient '%s' not found in EHR — proceeding from PDF only (Scenario A).",
+                    patient_identifier,
+                )
+                ehr_gap_extractions = [
+                    {
+                        "claim": (
+                            "Allergy status could not be verified — no EHR record found for this patient. "
+                            "Manual allergy verification required before proceeding."
+                        ),
+                        "citation": "EHR_UNAVAILABLE",
+                        "source": "EHR_UNAVAILABLE",
+                        "verbatim": True,
+                        "synthetic": True,
+                        "flag": "NO_EHR_ALLERGY_DATA",
+                    },
+                    {
+                        "claim": (
+                            "Medication list could not be retrieved from EHR — no patient record found. "
+                            "Drug interaction check is incomplete."
+                        ),
+                        "citation": "EHR_UNAVAILABLE",
+                        "source": "EHR_UNAVAILABLE",
+                        "verbatim": True,
+                        "synthetic": True,
+                        "flag": "NO_EHR_MEDICATION_DATA",
+                    },
+                ]
+                tool_trace.append({
+                    "tool": "ehr_gap_check",
+                    "input": patient_identifier,
+                    "output": {
+                        "patient_found": False,
+                        "pdf_fallback": True,
+                        "penalty": 45,
+                        "flags": ["NO_EHR_ALLERGY_DATA", "NO_EHR_MEDICATION_DATA"],
+                    },
+                })
+                state["ehr_confidence_penalty"] = 45
+                patient = None
+                patient_id = None
+            else:
+                patient = patient_result["patient"]
+                patient_id = patient["id"]
+                # Write to Layer 2 session cache so follow-up turns skip patient_lookup.
+                state["extracted_patient"] = patient
+
+        # ── EHR tool suite — only runs when patient was found in the database ─
         medications: List[dict] = []
         found_interactions: List[dict] = []
         proposed_drug = ""
@@ -394,6 +519,7 @@ def extractor_node(state: AgentState) -> AgentState:
                 "input": patient_id,
                 "output": meds_result,
             })
+            tool_call_history.append({"tool": "med_retrieval", "status": "success" if meds_result.get("success") else "fail", "ts": _ts})
             medications = meds_result.get("medications", []) if meds_result.get("success") else []
 
             # For SAFETY_CHECK: extract proposed drug, check allergy conflict (name + class),
@@ -426,12 +552,13 @@ def extractor_node(state: AgentState) -> AgentState:
                 "input": [m.get("name", m) if isinstance(m, dict) else m for m in meds_for_interaction_check],
                 "output": interactions_result,
             })
+            tool_call_history.append({"tool": "interaction_check", "status": "success" if interactions_result.get("success") else "fail", "ts": _ts})
             found_interactions = interactions_result.get("interactions", []) if interactions_result.get("success") else []
 
         all_extractions = _format_extractions(patient, medications, found_interactions)
 
         # Scenario A: patient not in EHR but PDF is attached — prepend EHR gap flags.
-        if patient is None:
+        if patient is None and ehr_gap_extractions:
             all_extractions = ehr_gap_extractions + all_extractions
 
         # If a drug-class or exact allergy conflict was found, inject an explicit extraction
@@ -457,43 +584,108 @@ def extractor_node(state: AgentState) -> AgentState:
                 conflict_allergy,
                 conflict_type,
             )
+
         documents_processed = [
             "mock_data/patients.json",
             "mock_data/medications.json",
             "mock_data/interactions.json",
         ]
 
-        # Step 4 — PDF extraction (runs only when a source file is provided)
+        # Step 4 — PDF extraction.
+        # Uses content-hash cache: re-extracts only when the document bytes change.
+        # This prevents stale extractions when a user uploads a different PDF in
+        # the same session (a hash mismatch forces re-extraction).
         pdf_source_file = (state.get("pdf_source_file") or "").strip()
         if pdf_source_file:
-            pdf_result = tool_extract_pdf(pdf_source_file)
-            tool_trace.append({
-                "tool": "tool_extract_pdf",
-                "input": pdf_source_file,
-                "output": {
-                    "success": pdf_result.get("success"),
-                    "element_count": pdf_result.get("element_count", 0),
-                    "source_file": pdf_result.get("source_file"),
-                    "error": pdf_result.get("error"),
-                },
-            })
-            if pdf_result.get("success"):
-                for pdf_ext in pdf_result.get("extractions", []):
+            current_hash = _get_pdf_content_hash(pdf_source_file)
+            cached_hash = state.get("extracted_pdf_hash", "")
+            cached_pages = state.get("extracted_pdf_pages") or {}
+
+            if current_hash and current_hash == cached_hash and cached_pages:
+                # Cache hit — same document bytes, skip extraction.
+                # Use .items() to preserve the page number stored as the dict key.
+                # Without this, page_number=None collapses all anchors to p.1
+                # in the UI and deduplication filters out pages 2-N.
+                logger.info("Extractor: PDF cache hit (hash=%s) — skipping pdf_extractor.", current_hash[:8])
+                for page_key, page_text in cached_pages.items():
                     all_extractions.append({
-                        "claim": pdf_ext.get("verbatim_quote", ""),
-                        "citation": pdf_ext.get("verbatim_quote", ""),
-                        "source": pdf_ext.get("source_file", pdf_source_file),
+                        "claim": page_text,
+                        "citation": page_text,
+                        "source": pdf_source_file,
                         "verbatim": True,
-                        "page_number": pdf_ext.get("page_number"),
-                        "element_type": pdf_ext.get("element_type"),
+                        "page_number": int(page_key) if str(page_key).isdigit() else None,
+                        "element_type": "cached",
                     })
                 documents_processed.append(pdf_source_file)
+                tool_call_history.append({"tool": "pdf_extractor", "status": "cache_hit", "ts": _ts})
             else:
-                logger.warning(
-                    "PDF extraction failed for '%s': %s",
-                    pdf_source_file,
-                    pdf_result.get("error"),
-                )
+                # Cache miss or hash mismatch — extract and update cache.
+                if cached_hash and current_hash != cached_hash:
+                    logger.info("Extractor: PDF hash mismatch — re-extracting new document.")
+                pdf_result = tool_extract_pdf(pdf_source_file)
+                tool_trace.append({
+                    "tool": "tool_extract_pdf",
+                    "input": pdf_source_file,
+                    "output": {
+                        "success": pdf_result.get("success"),
+                        "element_count": pdf_result.get("element_count", 0),
+                        "source_file": pdf_result.get("source_file"),
+                        "error": pdf_result.get("error"),
+                    },
+                })
+                tool_call_history.append({"tool": "pdf_extractor", "status": "success" if pdf_result.get("success") else "fail", "ts": _ts})
+                if pdf_result.get("success"):
+                    new_pages: dict = {}
+                    for pdf_ext in pdf_result.get("extractions", []):
+                        page_num = pdf_ext.get("page_number") or 0
+                        new_pages[str(page_num)] = pdf_ext.get("verbatim_quote", "")
+                        all_extractions.append({
+                            "claim": pdf_ext.get("verbatim_quote", ""),
+                            "citation": pdf_ext.get("verbatim_quote", ""),
+                            "source": pdf_ext.get("source_file", pdf_source_file),
+                            "verbatim": True,
+                            "page_number": pdf_ext.get("page_number"),
+                            "element_type": pdf_ext.get("element_type"),
+                        })
+                    # Write to Layer 2 cache.
+                    state["extracted_pdf_pages"] = new_pages
+                    state["extracted_pdf_hash"] = current_hash
+                    documents_processed.append(pdf_source_file)
+                else:
+                    logger.warning(
+                        "PDF extraction failed for '%s': %s",
+                        pdf_source_file,
+                        pdf_result.get("error"),
+                    )
+
+        # Step 4b — Policy search (if in tool_plan).
+        if "policy_search" in tool_plan:
+            policy_result = tool_search_policy(
+                payer_id=state.get("payer_id", "cigna"),
+                procedure_code=state.get("procedure_code", "27447"),
+                extractions=all_extractions,
+            )
+            tool_trace.append({
+                "tool": "tool_search_policy",
+                "input": {
+                    "payer_id": state.get("payer_id"),
+                    "procedure_code": state.get("procedure_code"),
+                },
+                "output": {
+                    "success": policy_result.get("success"),
+                    "policy_id": policy_result.get("policy_id"),
+                    "criteria_met_count": len(policy_result.get("criteria_met", [])),
+                    "criteria_unmet_count": len(policy_result.get("criteria_unmet", [])),
+                    "source": policy_result.get("source"),
+                },
+            })
+            tool_call_history.append({
+                "tool": "policy_search",
+                "status": "success" if policy_result.get("success") else "fail",
+                "ts": _ts,
+            })
+            if isinstance(state.get("payer_policy_cache"), dict):
+                state["payer_policy_cache"][state.get("payer_id", "")] = policy_result
 
         # Step 5 — Denial risk analysis.
         # Only runs for clinically meaningful intents or when a PDF is attached.
@@ -520,11 +712,27 @@ def extractor_node(state: AgentState) -> AgentState:
                     "matched_pattern_count": len(denial_result.get("matched_patterns", [])),
                 },
             })
+            tool_call_history.append({"tool": "denial_analyzer", "status": "success" if denial_result.get("success") else "fail", "ts": _ts})
+
+        # Update Layer 1 memory: prior_query_context for the next turn's Orchestrator.
+        # Stores the resolved patient name/ID and query intent so follow-up pronouns
+        # ("his", "her") resolve without re-running Step 0.
+        resolved_patient_name = ""
+        if patient and isinstance(patient, dict):
+            resolved_patient_name = patient.get("name") or patient.get("id") or ""
+        elif patient_identifier:
+            resolved_patient_name = patient_identifier
+        state["prior_query_context"] = {
+            "patient": resolved_patient_name,
+            "intent": state.get("query_intent", ""),
+            "turn_ts": _ts,
+        }
 
         state["extractions"] = all_extractions
         state["documents_processed"] = documents_processed
         state["denial_risk"] = denial_result
         state["tool_trace"] = tool_trace
+        state["tool_call_history"] = tool_call_history
         return state
 
     except Exception as e:

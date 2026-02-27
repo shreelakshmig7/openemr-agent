@@ -69,6 +69,8 @@ class AskRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
     pdf_source_file: Optional[str] = None
+    payer_id: Optional[str] = None
+    procedure_code: Optional[str] = None
 
 
 class AskResponse(BaseModel):
@@ -99,32 +101,13 @@ def _get_session_id(session_id: Optional[str]) -> str:
     return session_id if session_id else str(uuid.uuid4())
 
 
-def _query_contains_patient_identifier(question: str) -> bool:
-    """
-    Return True if the question contains a patient ID (P001-style) or
-    a two-word capitalized name. Used to decide whether to prepend
-    session context for follow-up questions.
-
-    Args:
-        question: Raw user question.
-
-    Returns:
-        bool: True if a patient identifier appears in the question.
-    """
-    if not question or not question.strip():
-        return False
-    if re.search(r"\b[Pp]\d{3,}\b", question):
-        return True
-    if re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", question.strip()):
-        return True
-    return False
-
-
 def _get_last_patient_from_state(prior_state: dict) -> Optional[str]:
     """
     Extract the last resolved patient name or ID from the prior workflow result.
-    Prefers extracted_patient_identifier.value (full name/ID from Step 0) so
-    prepend never uses a truncated first name; falls back to tool_trace.
+    Used only as a last-resort fallback for the pending_user_input clarification
+    resume path. Normal follow-up context is now handled by the memory system:
+    prior_query_context (Layer 2) and messages (Layer 1) carried into the next
+    run_workflow call via the prior_state merge.
 
     Args:
         prior_state: Last AgentState dict stored for this session.
@@ -138,16 +121,6 @@ def _get_last_patient_from_state(prior_state: dict) -> Optional[str]:
             val = extracted.get("value")
             if val and isinstance(val, str) and val.strip():
                 return val.strip()
-    except Exception:
-        pass
-    try:
-        trace = prior_state.get("tool_trace") or []
-        for call in trace:
-            if call.get("tool") == "tool_get_patient_info":
-                inp = call.get("input")
-                if inp and isinstance(inp, str) and inp.strip():
-                    return inp.strip()
-                break
     except Exception:
         pass
     return None
@@ -256,21 +229,23 @@ def ask(request: AskRequest) -> AskResponse:
     prior_state = _sessions.get(session_id)
 
     clarification_response = None
-    query_to_use = request.question
+    query = request.question
 
     if prior_state and prior_state.get("pending_user_input"):
+        # Treat the incoming message as the clarification answer, not a new query.
+        # The router must see the ORIGINAL query so it classifies intent correctly —
+        # a bare patient name like "John Smith" would otherwise be OUT_OF_SCOPE.
         clarification_response = request.question
-    else:
-        if prior_state and not _query_contains_patient_identifier(request.question):
-            last_patient = _get_last_patient_from_state(prior_state)
-            if last_patient:
-                query_to_use = f"Regarding {last_patient}: {request.question}"
+        query = prior_state.get("input_query", request.question)
 
     result = run_workflow(
-        query=query_to_use,
+        query=query,
         session_id=session_id,
         clarification_response=clarification_response,
         pdf_source_file=request.pdf_source_file,
+        prior_state=prior_state,
+        payer_id=request.payer_id,
+        procedure_code=request.procedure_code,
     )
 
     _sessions[session_id] = result

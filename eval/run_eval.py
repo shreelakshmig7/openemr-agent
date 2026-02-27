@@ -46,7 +46,137 @@ except ImportError:
 sys.path.insert(0, _REPO_ROOT)
 
 from langgraph_agent.workflow import run_workflow
+from langsmith import Client as LangSmithClient
+from langsmith.evaluation import EvaluationResult, evaluate
 from verification import should_escalate_to_human
+
+
+def _get_or_create_dataset(client: LangSmithClient, name: str):
+    """Get dataset by name, or create it if it does not exist (langsmith 0.4.x)."""
+    existing = list(client.list_datasets(dataset_name=name))
+    if existing:
+        return existing[0]
+    return client.create_dataset(name)
+
+
+def _populate_golden_dataset(
+    client: LangSmithClient,
+    golden_data_path: Optional[str] = None,
+) -> Optional[Any]:
+    """
+    Populate agentforge-rcm-golden from golden_data.yaml if it has no examples yet.
+    Only runs once — skips population if examples already exist.
+    """
+    try:
+        path = golden_data_path or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "golden_data.yaml"
+        )
+        dataset = _get_or_create_dataset(client, "agentforge-rcm-golden")
+
+        # Check if already populated — avoid duplicate examples on re-runs
+        existing = list(client.list_examples(dataset_id=dataset.id, limit=1))
+        if existing:
+            print("LangSmith: golden dataset already has examples — skipping population")
+            return dataset
+
+        test_cases = load_test_cases(path)
+        for case in test_cases:
+            client.create_example(
+                inputs={
+                    "query": case.get("query", ""),
+                    "pdf_source_file": case.get("pdf_source_file"),
+                },
+                outputs={
+                    "must_contain": case.get("must_contain", []),
+                    "must_not_contain": case.get("must_not_contain", []),
+                    "expected_confidence_max": case.get("expected_confidence_max"),
+                    "expected_escalate": case.get("expected_escalate"),
+                    "expected_denial_risk": case.get("expected_denial_risk"),
+                    "category": case.get("category", ""),
+                    "difficulty": case.get("difficulty", ""),
+                },
+                dataset_id=dataset.id,
+                metadata={"case_id": case.get("id", "")},
+            )
+        print(f"LangSmith: populated golden dataset with {len(test_cases)} cases")
+        return dataset
+    except Exception as e:
+        print(f"LangSmith golden population failed (non-fatal): {e}")
+        return None
+
+
+def _push_eval_to_langsmith(per_case_results: list, timestamp: str) -> None:
+    """Push eval run outcomes to LangSmith dataset agentforge-rcm-eval-results (non-fatal)."""
+    try:
+        client = LangSmithClient()
+        dataset = _get_or_create_dataset(client, "agentforge-rcm-eval-results")
+        for r in per_case_results:
+            client.create_example(
+                inputs={"case_id": r["id"], "category": r["category"]},
+                outputs={
+                    "passed": r["passed"],
+                    "confidence": r["actual"]["confidence"],
+                    "escalate": r["actual"]["escalate"],
+                    "denial_risk": r["actual"]["denial_risk_level"],
+                    "response_preview": r["response_preview"],
+                    "scores": r["scores"],
+                    "latency_seconds": r["latency_seconds"],
+                    "eval_timestamp": timestamp,
+                },
+                dataset_id=dataset.id,
+            )
+        print(f"LangSmith: pushed {len(per_case_results)} results to '{dataset.name}'")
+    except Exception as e:
+        print(f"LangSmith push failed (non-fatal): {e}")
+
+
+def faithfulness_scorer(run, example) -> EvaluationResult:
+    """Did the response use only verified citations? (no ehr_unavailable claim)."""
+    response = (run.outputs or {}).get("final_response", "")
+    score = 0.0 if "ehr_unavailable" in response.lower() else 1.0
+    return EvaluationResult(key="faithfulness", score=score)
+
+
+def citation_accuracy_scorer(run, example) -> EvaluationResult:
+    """Did every citation pass auditor verbatim check?"""
+    audit = (run.outputs or {}).get("audit_results", [])
+    validated = all(a.get("validated", False) for a in audit) if audit else False
+    return EvaluationResult(key="citation_accuracy", score=1.0 if validated else 0.0)
+
+
+def review_loop_rate_scorer(run, example) -> EvaluationResult:
+    """0 loops → 1.0 (clean), 1 loop → 0.5 (one retry), ≥2 → 0.0 (alert threshold)."""
+    iterations = (run.outputs or {}).get("iteration_count", 0)
+    score = 1.0 if iterations == 0 else (0.5 if iterations == 1 else 0.0)
+    return EvaluationResult(key="review_loop_rate", score=score)
+
+
+def _run_langsmith_evaluation() -> None:
+    """Run LangSmith evaluate() with golden dataset and domain scorers (non-fatal)."""
+    try:
+        client = LangSmithClient()
+
+        # Populate golden dataset from YAML if empty — idempotent
+        _populate_golden_dataset(client)
+
+        golden = _get_or_create_dataset(client, "agentforge-rcm-golden")
+        evaluate(
+            lambda inputs: run_workflow(
+                query=inputs.get("query", ""),
+                pdf_source_file=inputs.get("pdf_source_file"),
+            ),
+            data=golden.name,
+            evaluators=[
+                faithfulness_scorer,
+                citation_accuracy_scorer,
+                review_loop_rate_scorer,
+            ],
+            experiment_prefix="agentforge-rcm",
+            client=client,
+        )
+        print("LangSmith: evaluation run complete")
+    except Exception as e:
+        print(f"LangSmith evaluation failed (non-fatal): {e}")
 
 
 DEFAULT_GOLDEN_DATA_PATH = os.path.join(
@@ -210,6 +340,8 @@ def run_eval(
         must_contain = case.get("must_contain", [])
         must_not_contain = case.get("must_not_contain", [])
         pdf_source_file = case.get("pdf_source_file")
+        payer_id = case.get("payer_id")
+        procedure_code = case.get("procedure_code")
         expected_confidence_max = case.get("expected_confidence_max")
         expected_escalate = case.get("expected_escalate")
         expected_denial_risk = case.get("expected_denial_risk")
@@ -219,6 +351,8 @@ def run_eval(
             result = run_workflow(
                 query=query,
                 pdf_source_file=pdf_source_file,
+                payer_id=payer_id,
+                procedure_code=procedure_code,
             )
             # Use clarification_needed as fallback when final_response is empty.
             # This covers Scenario B (unknown patient hard-stop) and
@@ -316,6 +450,10 @@ def run_eval(
             print(f"Results saved to {filepath}")
         except Exception as e:
             print(f"Warning: could not save results: {e}")
+
+    if os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"):
+        _push_eval_to_langsmith(per_case_results, timestamp)
+        _run_langsmith_evaluation()
 
     return result_summary
 

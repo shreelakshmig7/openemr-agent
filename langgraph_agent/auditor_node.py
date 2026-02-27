@@ -167,6 +167,13 @@ Your task: Write a clear, concise clinical response in 3-8 sentences (or bullet 
 
 Rules:
 - Only use facts provided in the extractions — do NOT invent or assume any information
+- Search ALL sections of the provided text exhaustively — including historical narratives,
+  assessment sections, inline code mentions, and completed-treatment records.
+  Information that appears in a historical or completed context (e.g. "underwent 12 weeks
+  of PT") IS documented and MUST be reported as such, not treated as absent.
+- Inline mentions of codes or values (e.g. "ICD-10: M17.11" appearing in a clinical note)
+  are valid documented findings — report them directly, do not require them to appear in a
+  separate dedicated coding document.
 - For SAFETY_CHECK with an allergy conflict, begin with: "⚠️ ALLERGY CONFLICT: [drug] is contraindicated. Do NOT administer."
 - For SAFETY_CHECK with no conflict, begin with: "No known allergy conflict or drug interaction found for [drug] based on current records. Always verify with clinical judgment."
 - For prior authorization PDFs, structure as: Patient summary → Key clinical findings → Criteria status → Recommended action
@@ -206,6 +213,7 @@ def _synthesize_response(
     extractions: List[dict],
     allergy_conflict: Optional[dict],
     denial_risk: Optional[dict],
+    checked_sources_str: str = "",
 ) -> Optional[str]:
     """
     Use Claude Sonnet to synthesize a structured clinical response from validated extractions.
@@ -217,6 +225,9 @@ def _synthesize_response(
         extractions: All validated extraction dicts with claim, citation, source fields.
         allergy_conflict: Result from check_allergy_conflict (may be None or empty).
         denial_risk: Result from denial_analyzer (may be None or empty).
+        checked_sources_str: Comma-separated list of source paths actually checked this
+            query (e.g. "mock_data/patients.json, mock_data/medications.json"). Injected
+            into the SOURCE_INTEGRITY hard rule to prevent fabricated absence claims.
 
     Returns:
         str: Synthesized clinical response, or None if synthesis fails.
@@ -246,12 +257,37 @@ def _synthesize_response(
             )
 
         user_content = (
-            f"Query: {query}\n"
+            f"QUESTION TO ANSWER: {query}\n"
             f"Intent: {query_intent}\n"
+            f"\nINSTRUCTION: Find the SPECIFIC answer to the question above within "
+            f"the clinical facts below. Quote the relevant text that answers it. "
+            f"If the answer appears anywhere — including in historical records, "
+            f"completed treatment summaries, assessment sections, or inline code "
+            f"mentions (e.g. ICD-10, CPT codes) — extract and report it directly. "
+            f"Do not summarize the document generally; answer the specific question."
             f"{conflict_info}"
             f"{denial_info}\n\n"
-            f"Verified clinical facts:\n{facts}"
+            f"Clinical facts to search:\n{facts}"
         )
+
+        # Gate 3 — SOURCE_INTEGRITY hard rule injected into system prompt.
+        # Tells the LLM which sources were actually checked so it cannot
+        # fabricate absence from a source not in that list.
+        source_integrity_rule = ""
+        if checked_sources_str:
+            source_integrity_rule = (
+                f"\n\nHARD RULE — SOURCE INTEGRITY:\n"
+                f"The sources checked this query are: {checked_sources_str}\n"
+                f"You may ONLY report absence of information from sources in that list.\n"
+                f"If the query asks about a source NOT in that list:\n"
+                f"- Do NOT say 'no X was found'\n"
+                f"- Do NOT say 'X is not documented'\n"
+                f"- Say ONLY: 'I did not have access to [source] for this query'\n"
+                f"Fabricating a negative finding from an unchecked source is a "
+                f"clinical safety violation."
+            )
+
+        system_prompt = _SYNTHESIS_SYSTEM + source_integrity_rule
 
         llm = ChatAnthropic(
             model="claude-sonnet-4-5",
@@ -260,7 +296,7 @@ def _synthesize_response(
             max_tokens=512,
         )
         response = llm.invoke([
-            SystemMessage(content=_SYNTHESIS_SYSTEM),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=user_content),
         ])
         content = response.content if hasattr(response, "content") else str(response)

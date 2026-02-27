@@ -5,7 +5,13 @@ AgentForge — Healthcare RCM AI Agent — Tests for assembled LangGraph workflo
 ------------------------------------------------------------------------------
 End-to-end tests of the full LangGraph state machine. All node functions
 are mocked. Tests routing paths, review loop enforcement, clarification
-pause/resume, session isolation, and error handling.
+pause/resume, session isolation, error handling, and memory system behaviour.
+
+Memory system tests (added for memory system implementation):
+    - prior_state Layer 2 cache fields are merged into new initial state
+    - prior_state=None on first call (no cache to merge)
+    - session_id is written into initial state before graph runs
+    - Layer 2 cache fields not in prior_state are not overwritten
 
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
@@ -210,3 +216,203 @@ class TestWorkflowErrorHandling:
         assert isinstance(result, dict)
         assert "error" in result
         assert result["error"] is not None
+
+
+# ── Tests: memory system (Layer 2 prior_state merge) ─────────────────────────
+
+class TestWorkflowMemorySystem:
+    def test_no_prior_state_first_call_has_empty_caches(self):
+        """On a first call (prior_state=None), the initial state has empty Layer 2 caches."""
+        captured_states = []
+
+        def _capture_extractor(state):
+            captured_states.append(dict(state))
+            state["extractions"] = []
+            state["tool_trace"] = []
+            state["extracted_patient_identifier"] = {"type": "none", "ambiguous": True, "reason": "test"}
+            state["clarification_needed"] = "Which patient?"
+            state["pending_user_input"] = True
+            return state
+
+        with patch("langgraph_agent.workflow.extractor_node", side_effect=_capture_extractor), \
+             patch("langgraph_agent.workflow.orchestrator_node", side_effect=lambda s: s), \
+             patch("langgraph_agent.workflow.router_node", side_effect=lambda s: {**s, "routing_decision": "clinical", "query_intent": "MEDICATIONS"}):
+            run_workflow("What medications is John Smith taking?", session_id="test-mem-first-1", prior_state=None)
+
+        assert len(captured_states) == 1
+        assert captured_states[0]["extracted_patient"] == {}
+        assert captured_states[0]["extracted_pdf_hash"] == ""
+        assert captured_states[0]["prior_query_context"] == {}
+
+    def test_prior_state_cache_fields_merged_into_new_state(self):
+        """When prior_state contains Layer 2 cache fields, they are merged into
+        the new initial state before the graph runs — so Orchestrator sees the cache."""
+        captured_states = []
+        prior = {
+            "extracted_patient": {"id": "P001", "name": "John Smith"},
+            "extracted_pdf_hash": "abc123",
+            "extracted_pdf_pages": {"1": "some text"},
+            "payer_policy_cache": {"cigna": {"criteria": "met"}},
+            "prior_query_context": {"patient": "John Smith", "intent": "MEDICATIONS"},
+            "tool_call_history": [{"tool": "patient_lookup", "status": "success"}],
+            "messages": [],
+        }
+
+        def _capture_extractor(state):
+            captured_states.append(dict(state))
+            state["extractions"] = []
+            state["tool_trace"] = []
+            state["extracted_patient_identifier"] = {"type": "none", "ambiguous": True, "reason": "test"}
+            state["clarification_needed"] = "Which patient?"
+            state["pending_user_input"] = True
+            return state
+
+        with patch("langgraph_agent.workflow.extractor_node", side_effect=_capture_extractor), \
+             patch("langgraph_agent.workflow.orchestrator_node", side_effect=lambda s: s), \
+             patch("langgraph_agent.workflow.router_node", side_effect=lambda s: {**s, "routing_decision": "clinical", "query_intent": "MEDICATIONS"}):
+            run_workflow("Does he have any allergies?", session_id="test-mem-merge-1", prior_state=prior)
+
+        assert len(captured_states) == 1
+        merged = captured_states[0]
+        assert merged["extracted_patient"] == {"id": "P001", "name": "John Smith"}
+        assert merged["extracted_pdf_hash"] == "abc123"
+        assert merged["prior_query_context"]["patient"] == "John Smith"
+
+    def test_session_id_written_into_initial_state(self):
+        """session_id passed to run_workflow must appear in the state seen by nodes."""
+        captured_states = []
+
+        def _capture_extractor(state):
+            captured_states.append(dict(state))
+            state["extractions"] = []
+            state["tool_trace"] = []
+            state["extracted_patient_identifier"] = {"type": "none", "ambiguous": True, "reason": "test"}
+            state["clarification_needed"] = "Which patient?"
+            state["pending_user_input"] = True
+            return state
+
+        with patch("langgraph_agent.workflow.extractor_node", side_effect=_capture_extractor), \
+             patch("langgraph_agent.workflow.orchestrator_node", side_effect=lambda s: s), \
+             patch("langgraph_agent.workflow.router_node", side_effect=lambda s: {**s, "routing_decision": "clinical", "query_intent": "MEDICATIONS"}):
+            run_workflow("Any query", session_id="my-session-id-42", prior_state=None)
+
+        assert captured_states[0]["session_id"] == "my-session-id-42"
+
+    def test_prior_state_empty_cache_fields_not_overwritten(self):
+        """If a cache field is empty in prior_state (falsy), it should not overwrite
+        the fresh initial state default — only populated cache fields are merged."""
+        prior = {
+            "extracted_patient": {},
+            "extracted_pdf_hash": "",
+            "prior_query_context": {},
+        }
+        captured_states = []
+
+        def _capture_extractor(state):
+            captured_states.append(dict(state))
+            state["extractions"] = []
+            state["tool_trace"] = []
+            state["extracted_patient_identifier"] = {"type": "none", "ambiguous": True, "reason": "test"}
+            state["clarification_needed"] = "Which patient?"
+            state["pending_user_input"] = True
+            return state
+
+        with patch("langgraph_agent.workflow.extractor_node", side_effect=_capture_extractor), \
+             patch("langgraph_agent.workflow.orchestrator_node", side_effect=lambda s: s), \
+             patch("langgraph_agent.workflow.router_node", side_effect=lambda s: {**s, "routing_decision": "clinical", "query_intent": "MEDICATIONS"}):
+            run_workflow("Any query", session_id="test-mem-empty-1", prior_state=prior)
+
+        assert captured_states[0]["extracted_patient"] == {}
+        assert captured_states[0]["extracted_pdf_hash"] == ""
+
+    def test_pdf_source_file_carried_forward_when_not_re_attached(self):
+        """Turn 2 follow-up with no PDF re-upload must still have pdf_source_file from Turn 1.
+        This is the core fix: the user shouldn't need to re-attach the same PDF every turn."""
+        captured_states = []
+        prior = {
+            "extracted_pdf_pages": {"1": "PT duration: 6 weeks"},
+            "extracted_pdf_hash": "abc123",
+            "pdf_source_file": "/uploads/AgentForge_Test_ClinicalNote.pdf",
+        }
+
+        def _capture_extractor(state):
+            captured_states.append(dict(state))
+            state["extractions"] = []
+            state["tool_trace"] = []
+            state["extracted_patient_identifier"] = {"type": "none", "ambiguous": True, "reason": "test"}
+            state["clarification_needed"] = "Which patient?"
+            state["pending_user_input"] = True
+            return state
+
+        with patch("langgraph_agent.workflow.extractor_node", side_effect=_capture_extractor), \
+             patch("langgraph_agent.workflow.orchestrator_node", side_effect=lambda s: s), \
+             patch("langgraph_agent.workflow.router_node", side_effect=lambda s: {**s, "routing_decision": "clinical", "query_intent": "CHART_REVIEW"}):
+            run_workflow(
+                "Find the physical therapy duration. Scan the whole chart.",
+                session_id="test-pdf-carryforward",
+                pdf_source_file=None,
+                prior_state=prior,
+            )
+
+        merged = captured_states[0]
+        assert merged["pdf_source_file"] == "/uploads/AgentForge_Test_ClinicalNote.pdf"
+        assert merged["extracted_pdf_pages"] == {"1": "PT duration: 6 weeks"}
+        assert merged["extracted_pdf_hash"] == "abc123"
+
+    def test_new_pdf_upload_wins_over_carried_forward_path(self):
+        """If the user attaches a new PDF on a follow-up turn, it must win over the
+        cached path — explicit upload always takes priority over carryforward."""
+        captured_states = []
+        prior = {
+            "extracted_pdf_pages": {"1": "old content"},
+            "extracted_pdf_hash": "oldhash",
+            "pdf_source_file": "/uploads/OldDocument.pdf",
+        }
+
+        def _capture_extractor(state):
+            captured_states.append(dict(state))
+            state["extractions"] = []
+            state["tool_trace"] = []
+            state["extracted_patient_identifier"] = {"type": "none", "ambiguous": True, "reason": "test"}
+            state["clarification_needed"] = "Which patient?"
+            state["pending_user_input"] = True
+            return state
+
+        with patch("langgraph_agent.workflow.extractor_node", side_effect=_capture_extractor), \
+             patch("langgraph_agent.workflow.orchestrator_node", side_effect=lambda s: s), \
+             patch("langgraph_agent.workflow.router_node", side_effect=lambda s: {**s, "routing_decision": "clinical", "query_intent": "CHART_REVIEW"}):
+            run_workflow(
+                "Review this new document.",
+                session_id="test-new-pdf-wins",
+                pdf_source_file="/uploads/NewDocument.pdf",
+                prior_state=prior,
+            )
+
+        merged = captured_states[0]
+        assert merged["pdf_source_file"] == "/uploads/NewDocument.pdf"
+
+    def test_no_prior_state_pdf_source_file_stays_empty(self):
+        """On a first-turn call with no prior_state and no PDF, pdf_source_file stays empty.
+        No cross-session bleed."""
+        captured_states = []
+
+        def _capture_extractor(state):
+            captured_states.append(dict(state))
+            state["extractions"] = []
+            state["tool_trace"] = []
+            state["extracted_patient_identifier"] = {"type": "none", "ambiguous": True, "reason": "test"}
+            state["clarification_needed"] = "Which patient?"
+            state["pending_user_input"] = True
+            return state
+
+        with patch("langgraph_agent.workflow.extractor_node", side_effect=_capture_extractor), \
+             patch("langgraph_agent.workflow.orchestrator_node", side_effect=lambda s: s), \
+             patch("langgraph_agent.workflow.router_node", side_effect=lambda s: {**s, "routing_decision": "clinical", "query_intent": "MEDICATIONS"}):
+            run_workflow(
+                "What medications is John on?",
+                session_id="test-no-prior",
+                pdf_source_file=None,
+                prior_state=None,
+            )
+
+        assert captured_states[0]["pdf_source_file"] == ""

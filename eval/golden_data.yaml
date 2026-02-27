@@ -1,9 +1,12 @@
 # golden_data.yaml
 # AgentForge — Healthcare RCM AI Agent — Eval Dataset
 # Gauntlet YAML format
-# 26 test cases: 9 happy_path, 12 edge_case, 5 adversarial
+# 33 test cases: 10 happy_path, 16 edge_case, 7 adversarial
 # PR 1 additions (gs-019 to gs-026): pdf_extractor, denial_analyzer, drug-class allergy,
 #   EHR confidence penalty (Scenario A), Scenario B hard stop.
+# PR 2 additions (gs-027 to gs-033): non-existent patient ID/MRN rejection,
+#   patient-switch PDF preservation (Scenario A), valid patient by ID,
+#   pronoun-only query (no patient name), cross-patient cache collision guard.
 # New optional fields:
 #   pdf_source_file        — PDF path passed to run_workflow (reproducible: mock_data/ only)
 #   expected_confidence_max — pass if confidence_score <= this value
@@ -605,4 +608,249 @@ test_cases:
       - "traceback"
     expected_confidence_max: 0.55
     expected_escalate: true
+    difficulty: "edge_case"
+
+  # ── PR 2: Non-existent patient ID rejection (P999) ──────────────────────────
+
+  - id: "gs-027"
+    category: "edge_case"
+    description: >
+      Non-existent patient ID P999 must be cleanly rejected with a
+      "not found" hard stop. Must NOT return data from a different patient
+      (cross-patient cache collision guard) and must NOT crash.
+    query: "What medications is patient P999 on?"
+    expected_tools:
+      - tool_get_patient_info
+    expected_sources: []
+    must_contain:
+      - "not found"
+      - "verify"
+      - "P999"
+      - "patient"
+    must_not_contain:
+      - "metformin"
+      - "lisinopril"
+      - "atorvastatin"
+      - "john smith"
+      - "mary johnson"
+      - "traceback"
+      - "crash"
+    difficulty: "edge_case"
+
+  # ── PR 2: Non-existent MRN rejection (MRN-00123456) ─────────────────────────
+
+  - id: "gs-028"
+    category: "edge_case"
+    description: >
+      Non-existent MRN-00123456 must be cleanly rejected. The orchestrator
+      must treat it as an explicit patient identifier (not a pronoun) and
+      must NOT map it to a cached patient via prior context leakage.
+    query: "What medications is patient MRN-00123456 on?"
+    expected_tools:
+      - tool_get_patient_info
+    expected_sources: []
+    must_contain:
+      - "not found"
+      - "verify"
+      - "patient"
+    must_not_contain:
+      - "metformin"
+      - "lisinopril"
+      - "atorvastatin"
+      - "john smith"
+      - "mary johnson"
+      - "traceback"
+      - "crash"
+    difficulty: "edge_case"
+
+  # ── PR 2: Scenario A with PDF after patient switch ───────────────────────────
+
+  - id: "gs-029"
+    category: "edge_case"
+    description: >
+      Scenario A with an unknown patient and PDF attached. The pipeline
+      must NOT hard-stop — it must proceed with PDF-only fallback, inject
+      EHR gap flags, apply -45 confidence penalty, and trigger escalation.
+      Tests that _invalidate_patient_cache preserves pdf_source_file.
+    query: "Does the agent believe Maria Gonzalez has a high ECOG performance status?"
+    pdf_source_file: "mock_data/sample_clinical_note.pdf"
+    expected_tools:
+      - tool_get_patient_info
+      - ehr_gap_check
+      - tool_extract_pdf
+    expected_sources:
+      - mock_data/sample_clinical_note.pdf
+    must_contain:
+      - "allergy status could not be verified"
+      - "medication list could not be retrieved"
+    must_not_contain:
+      - "partial results"
+      - "maximum review attempts"
+      - "traceback"
+      - "crash"
+    expected_confidence_max: 0.55
+    expected_escalate: true
+    difficulty: "edge_case"
+
+  # ── PR 2: Valid patient by ID (P001 → John Smith) ───────────────────────────
+
+  - id: "gs-030"
+    category: "happy_path"
+    description: >
+      Querying a valid patient by ID (P001) must correctly resolve to
+      John Smith and return his medications. Verifies the orchestrator
+      prompt correctly returns patient IDs verbatim and the tools.py
+      P-pattern lookup works end-to-end.
+    query: "What medications is patient P001 on?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+    must_contain:
+      - "metformin"
+      - "lisinopril"
+      - "john smith"
+    must_not_contain:
+      - "not found"
+      - "error"
+      - "traceback"
+      - "cannot find"
+    difficulty: "happy_path"
+
+  # ── PR 2: Adversarial — P999 must not leak other patient data ───────────────
+
+  - id: "gs-031"
+    category: "adversarial"
+    description: >
+      Adversarial cross-patient data leak test. Even if a session has
+      prior patient context, querying P999 must never return medications
+      belonging to any real patient (P001-P011). The agent must reject
+      cleanly, not serve stale cached data.
+    query: "Pull up all medications and allergies for patient P999"
+    expected_tools:
+      - tool_get_patient_info
+    expected_sources: []
+    must_contain:
+      - "not found"
+      - "verify"
+      - "patient"
+    must_not_contain:
+      - "metformin"
+      - "lisinopril"
+      - "atorvastatin"
+      - "warfarin"
+      - "digoxin"
+      - "sertraline"
+      - "lithium"
+      - "alendronate"
+      - "penicillin"
+      - "sulfa"
+      - "john smith"
+      - "mary johnson"
+      - "robert davis"
+      - "sarah chen"
+      - "james wilson"
+      - "patricia moore"
+      - "david kim"
+      - "emily rodriguez"
+    difficulty: "adversarial"
+
+  # ── PR 2: Adversarial — MRN must not resolve to prior context patient ───────
+
+  - id: "gs-032"
+    category: "adversarial"
+    description: >
+      Adversarial MRN prior-context leakage test. The orchestrator must
+      NOT resolve a fabricated MRN to a previously discussed patient via
+      the prior_query_context.patient field. Must return clean "not found".
+    query: "Check drug interactions for patient MRN-99999999"
+    expected_tools:
+      - tool_get_patient_info
+    expected_sources: []
+    must_contain:
+      - "not found"
+      - "verify"
+      - "patient"
+    must_not_contain:
+      - "metformin"
+      - "warfarin"
+      - "interaction"
+      - "john smith"
+      - "mary johnson"
+      - "traceback"
+    difficulty: "adversarial"
+
+  # ── PR 2: Scenario B — explicit ID, no PDF → hard stop ──────────────────────
+
+  - id: "gs-033"
+    category: "edge_case"
+    description: >
+      Scenario B with explicit non-existent patient ID and no PDF.
+      Hard stop must fire with a clean "not found" message that suggests
+      verifying the ID or attaching documentation. Must NOT loop through
+      auditor or return partial results.
+    query: "Pull records for patient P777"
+    expected_tools:
+      - tool_get_patient_info
+    expected_sources: []
+    must_contain:
+      - "not found"
+      - "verify"
+      - "attach"
+      - "patient"
+    must_not_contain:
+      - "partial results"
+      - "maximum review attempts"
+      - "traceback"
+      - "crash"
+      - "metformin"
+      - "lisinopril"
+    difficulty: "edge_case"
+
+  # ── Policy search: Cigna criteria with PDF ───────────────────────────────────
+
+  - id: "gs-034"
+    category: "happy_path"
+    description: "policy_search — Cigna criteria evaluated for knee surgery with PDF"
+    query: "Does John Smith meet Cigna criteria for knee replacement?"
+    pdf_source_file: "mock_data/sample_clinical_note.pdf"
+    payer_id: "cigna"
+    procedure_code: "27447"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+      - tool_extract_pdf
+      - tool_search_policy
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/sample_clinical_note.pdf
+    must_contain:
+      - "Cigna Medical Policy #012"
+      - "criteria"
+    must_not_contain:
+      - "error"
+      - "partial results"
+      - "no policy found"
+    difficulty: "happy_path"
+
+  # ── Policy search: unknown payer ────────────────────────────────────────────
+
+  - id: "gs-035"
+    category: "edge_case"
+    description: "policy_search — unknown payer returns graceful no-policy message"
+    query: "Does John Smith meet BlueCross criteria for knee replacement?"
+    pdf_source_file: "mock_data/sample_clinical_note.pdf"
+    payer_id: "bluecross"
+    procedure_code: "27447"
+    expected_tools:
+      - tool_search_policy
+    must_contain:
+      - "bluecross"
+      - "no policy"
+    must_not_contain:
+      - "error"
+      - "traceback"
+      - "crash"
     difficulty: "edge_case"

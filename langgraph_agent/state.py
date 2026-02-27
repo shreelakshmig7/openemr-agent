@@ -16,12 +16,52 @@ Key fields:
     pdf_source_file: Optional PDF path to process alongside the text query.
     denial_risk: Set by Extractor Node — result of analyze_denial_risk() on all extractions.
 
+Memory System fields (Layer 1 — Conversation History):
+    messages: Full conversation history managed by LangGraph add_messages reducer.
+        Nodes append new messages; the reducer merges without overwriting prior turns.
+        Enables pronoun resolution ("his", "her") across turns without re-running Step 0.
+
+Memory System fields (Layer 2 — Session Cache):
+    session_id: Ties graph invocations to a single user thread for checkpointer scoping.
+    tool_call_history: Ordered log of every tool called this session with status/timestamp.
+    prior_query_context: Resolved patient name and query intent from the previous turn.
+        Passed to Orchestrator so follow-up pronouns resolve without re-running Step 0 Haiku.
+    extracted_patient: Cached patient dict. Orchestrator skips patient_lookup when populated.
+    extracted_pdf_pages: Page-keyed dict of extracted PDF text. Valid only when
+        extracted_pdf_hash matches the MD5 of the current pdf_source_file content.
+    extracted_pdf_hash: MD5 hex digest of the raw bytes of the last extracted PDF.
+        Hashes file content (not path) — catches same-path replacement of uploaded files.
+    payer_policy_cache: Policy search results keyed by payer_id.
+    denial_risk_cache: Denial analysis results keyed by "payer_id:cpt_code".
+
+Orchestrator fields:
+    tool_plan: Ordered list of tool name strings set by Orchestrator Node. Extractor
+        executes only these tools in order. Empty list = general knowledge query — Extractor
+        skips all tools with no Scenario A trigger or phantom confidence penalty.
+    orchestrator_ran: True once Orchestrator has intentionally set tool_plan. Distinguishes
+        orchestrator-set empty plan (general knowledge) from legacy/direct-test empty plan
+        (backward compatible — runs full tool suite when False).
+    identified_patient_name: Full patient name (or None) extracted by the Orchestrator's
+        single Haiku call. Extractor reads this instead of calling _extract_patient_identifier_llm
+        (Step 0), eliminating the second Haiku call per request and halving API load.
+    orchestrator_fallback: Set to True when all Haiku retries are exhausted and the
+        Orchestrator falls back to regex-based name extraction. Captured in state so
+        LangSmith traces can surface 529 frequency over time.
+    data_source_required: Classified by Orchestrator Haiku — the source the query needs:
+        "EHR", "PDF", "RESIDENT_NOTE", "IMAGING", or "NONE". Output Node verifies this
+        source was actually checked before synthesizing a response.
+    source_unavailable: True when pdf_required=True but no PDF is attached. Short-circuits
+        tool execution; Output Node Gate 1 emits "I don't have access to..." response.
+    source_unavailable_reason: The data_source_required value that triggered the flag
+        (e.g. "RESIDENT_NOTE"). Used by Output Node to name the missing source clearly.
+
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
 """
 
-from typing import List, Optional
+from typing import Annotated, List, Optional
 from typing_extensions import TypedDict
+from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict):
@@ -67,6 +107,27 @@ class AgentState(TypedDict):
             exact page. Only populated for PDF-sourced extractions — EHR/mock sources are excluded.
             Schema: [{"label": str, "file": str, "page": int}]
 
+        --- Memory System Fields ---
+        messages: Full conversation history (Layer 1). Uses LangGraph add_messages reducer —
+            new messages are appended automatically; prior turns are never overwritten.
+        session_id: Caller-supplied session identifier threaded through to SQLite checkpointer
+            as thread_id for cross-restart state persistence (Layer 3).
+        tool_call_history: Ordered log of every tool called this session with status and
+            timestamp. Used by Orchestrator to detect redundant calls (Layer 2).
+        prior_query_context: Lightweight summary of the previous turn — intent + resolved
+            patient identifier — so follow-up pronouns resolve without re-running Step 0.
+        extracted_patient: Cached patient dict from the current session (Layer 2 cache).
+            Orchestrator skips patient_lookup when this is populated.
+        extracted_pdf_pages: Page-keyed dict of extracted PDF text (Layer 2 cache). Only
+            valid when extracted_pdf_hash matches the MD5 of the current pdf_source_file.
+        extracted_pdf_hash: MD5 hex digest of the raw bytes of the last extracted PDF.
+            Compared against the hash of the current pdf_source_file before using the cache.
+        payer_policy_cache: Policy search results keyed by payer_id (Layer 2 cache).
+        denial_risk_cache: Denial analysis results keyed by "payer_id:cpt_code" (Layer 2 cache).
+        tool_plan: Ordered list of tool name strings produced by Orchestrator Node. The
+            Extractor executes only these tools, in order. Empty list = general knowledge
+            query — Extractor skips all tools and passes directly to Auditor.
+
     Returns:
         TypedDict compatible with LangGraph StateGraph.
     """
@@ -89,10 +150,37 @@ class AgentState(TypedDict):
     tool_trace: List[dict]
     extracted_patient_identifier: dict
     pdf_source_file: str
+    payer_id: str
+    procedure_code: str
     denial_risk: dict
     allergy_conflict_result: dict
     ehr_confidence_penalty: int
     citation_anchors: List[dict]
+
+    # Memory System — Layer 1: Conversation History
+    messages: Annotated[list, add_messages]
+
+    # Memory System — Layer 2: Session Context Cache
+    session_id: str
+    tool_call_history: List[dict]
+    prior_query_context: dict
+    extracted_patient: dict
+    extracted_pdf_pages: dict
+    extracted_pdf_hash: str
+    payer_policy_cache: dict
+    denial_risk_cache: dict
+
+    # Orchestrator
+    tool_plan: List[str]
+    orchestrator_ran: bool      # True once Orchestrator Node has set tool_plan intentionally.
+    identified_patient_name: Optional[str]  # Patient name extracted by Orchestrator's single Haiku call.
+    orchestrator_fallback: bool  # True when all Haiku retries failed and regex fallback was used.
+    data_source_required: str   # Data source the query needs: EHR / PDF / RESIDENT_NOTE / IMAGING / NONE.
+    source_unavailable: bool    # True when required source (PDF/note) was not attached.
+    source_unavailable_reason: str  # The data_source_required value that triggered the unavailable flag.
+    is_general_knowledge: bool  # True ONLY for factual/pharmacology queries with no patient or doc needed.
+                                # Extractor reads this — not tool_plan=[] — to trigger the bypass,
+                                # so patient cache-hit paths (also tool_plan=[]) are not incorrectly skipped.
 
 
 def create_initial_state(query: str) -> AgentState:
@@ -128,8 +216,28 @@ def create_initial_state(query: str) -> AgentState:
         "tool_trace": [],
         "extracted_patient_identifier": {},
         "pdf_source_file": "",
+        "payer_id": "",
+        "procedure_code": "",
         "denial_risk": {},
         "allergy_conflict_result": {},
         "ehr_confidence_penalty": 0,
         "citation_anchors": [],
+        # Memory System defaults
+        "messages": [],
+        "session_id": "",
+        "tool_call_history": [],
+        "prior_query_context": {},
+        "extracted_patient": {},
+        "extracted_pdf_pages": {},
+        "extracted_pdf_hash": "",
+        "payer_policy_cache": {},
+        "denial_risk_cache": {},
+        "tool_plan": [],
+        "orchestrator_ran": False,
+        "identified_patient_name": None,
+        "orchestrator_fallback": False,
+        "data_source_required": "NONE",
+        "source_unavailable": False,
+        "source_unavailable_reason": "",
+        "is_general_knowledge": False,
     }

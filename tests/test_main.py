@@ -62,7 +62,8 @@ def _mock_run_eval(*args, **kwargs):
 
 
 def _make_mock_run_workflow(captured_queries):
-    """Factory: mock run_workflow appends each call's query to captured_queries and returns state with tool_trace."""
+    """Factory: mock run_workflow appends each call's (query, prior_state) to captured_queries
+    and returns state with tool_trace and prior_query_context for memory system testing."""
 
     state_with_trace = {
         "final_response": "John Smith has known allergies: Penicillin, Sulfa.",
@@ -72,14 +73,15 @@ def _make_mock_run_workflow(captured_queries):
             {"tool": "tool_get_medications", "input": "P001"},
         ],
         "extracted_patient_identifier": {"type": "name", "value": "John Smith", "ambiguous": False},
+        "prior_query_context": {"patient": "John Smith", "intent": "MEDICATIONS"},
         "pending_user_input": False,
         "clarification_needed": "",
         "extractions": [],
         "error": None,
     }
 
-    def _mock(query, session_id=None, clarification_response=None):
-        captured_queries.append(query)
+    def _mock(query, session_id=None, clarification_response=None, pdf_source_file=None, prior_state=None):
+        captured_queries.append({"query": query, "prior_state": prior_state})
         return state_with_trace
 
     return _mock
@@ -183,8 +185,9 @@ def test_ask_reuses_session():
         assert r2["session_id"] == session_id
 
 
-def test_ask_follow_up_prepends_session_patient_context():
-    """Follow-up question without patient ID (e.g. 'Does he have any allergies?') gets prior patient prepended."""
+def test_ask_follow_up_passes_prior_state_for_memory_system():
+    """Follow-up question passes prior_state to run_workflow so the memory system
+    (Orchestrator prior_query_context) can resolve patient context without string prepending."""
     captured = []
     with patch("main.run_workflow", side_effect=_make_mock_run_workflow(captured)):
         from fastapi.testclient import TestClient
@@ -197,8 +200,15 @@ def test_ask_follow_up_prepends_session_patient_context():
             "session_id": r1["session_id"],
         }).json()
         assert len(captured) == 2
-        assert "Regarding John Smith" in captured[1], "Second request should prepend prior patient for follow-up"
-        assert "allergies" in captured[1].lower()
+        # First call: no prior state
+        assert captured[0]["prior_state"] is None
+        # Second call: prior_state carries session context for Orchestrator to resolve "he"
+        assert captured[1]["prior_state"] is not None
+        assert "prior_query_context" in captured[1]["prior_state"]
+        assert captured[1]["prior_state"]["prior_query_context"]["patient"] == "John Smith"
+        # Query is passed unchanged — no crude string prepend
+        assert "Does he have any allergies?" in captured[1]["query"]
+        assert "Regarding" not in captured[1]["query"]
 
 
 def test_ask_empty_question():
