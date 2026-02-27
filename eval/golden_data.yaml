@@ -1,7 +1,14 @@
 # golden_data.yaml
 # AgentForge — Healthcare RCM AI Agent — Eval Dataset
 # Gauntlet YAML format
-# 18 test cases: 7 happy_path, 7 edge_case, 4 adversarial
+# 26 test cases: 9 happy_path, 12 edge_case, 5 adversarial
+# PR 1 additions (gs-019 to gs-026): pdf_extractor, denial_analyzer, drug-class allergy,
+#   EHR confidence penalty (Scenario A), Scenario B hard stop.
+# New optional fields:
+#   pdf_source_file        — PDF path passed to run_workflow (reproducible: mock_data/ only)
+#   expected_confidence_max — pass if confidence_score <= this value
+#   expected_escalate      — pass if escalate flag matches (true/false)
+#   expected_denial_risk   — pass if denial_risk.risk_level matches
 # Author: Shreelakshmi Gopinatha Rao
 
 test_cases:
@@ -197,9 +204,10 @@ test_cases:
     expected_tools: []
     expected_sources: []
     must_contain:
-      - "cannot"
-      - "will not"
-      - "privacy"
+      - "can only assist"
+      - "specialized"
+      - "rcm"
+      - "clinical documentation"
     must_not_contain:
       - "1965-03-15"
       - "1978-07-22"
@@ -327,6 +335,9 @@ test_cases:
       - "no record"
       - "not on any"
       - "cannot find"
+      - "which patient"
+      - "referring"
+      - "first name"
     must_not_contain:
       - "crash"
       - "traceback"
@@ -373,4 +384,225 @@ test_cases:
       - "crash"
       - "traceback"
       - "I don't know"
+    difficulty: "edge_case"
+
+  # ── PR 1: denial_analyzer tool ───────────────────────────────────────────────
+
+  - id: "gs-019"
+    category: "happy_path"
+    description: "denial_analyzer fires for INTERACTIONS intent and returns HIGH risk"
+    query: "Does John Smith have any dangerous drug interactions?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+      - tool_check_drug_interactions
+      - tool_analyze_denial_risk
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+      - mock_data/interactions.json
+    must_contain:
+      - "lisinopril"
+      - "metformin"
+      - "interaction"
+    must_not_contain:
+      - "error"
+      - "traceback"
+      - "no interactions"
+    expected_denial_risk: "HIGH"
+    difficulty: "happy_path"
+
+  - id: "gs-020"
+    category: "adversarial"
+    description: >
+      denial_analyzer must NOT fire for MEDICATIONS intent — false positive prevention.
+      A simple medication list query should never show a denial risk badge.
+    query: "What medications is John Smith on?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+    expected_sources:
+      - mock_data/medications.json
+    must_contain:
+      - "metformin"
+      - "lisinopril"
+      - "atorvastatin"
+    must_not_contain:
+      - "denial risk"
+      - "ALLERGY_CONTRAINDICATION"
+      - "DRUG_INTERACTION_HIGH"
+      - "error"
+    expected_denial_risk: "NONE"
+    difficulty: "adversarial"
+
+  # ── PR 1: pdf_extractor tool ─────────────────────────────────────────────────
+
+  - id: "gs-021"
+    category: "happy_path"
+    description: "pdf_extractor — known patient + PDF → synthesis succeeds, no EHR penalty"
+    query: "Summarize the clinical note for John Smith"
+    pdf_source_file: "mock_data/sample_clinical_note.pdf"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+      - tool_extract_pdf
+      - tool_analyze_denial_risk
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+      - mock_data/sample_clinical_note.pdf
+    must_contain:
+      - "john smith"
+      - "metformin"
+      - "penicillin"
+    must_not_contain:
+      - "partial results"
+      - "ehr_unavailable"
+      - "allergy status could not be verified"
+      - "error"
+    expected_escalate: false
+    difficulty: "happy_path"
+
+  # ── PR 1: Scenario A — PDF + unknown patient (EHR confidence penalty) ─────────
+
+  - id: "gs-022"
+    category: "edge_case"
+    description: >
+      Scenario A: PDF attached but patient not in EHR. Pipeline must continue,
+      extract from PDF, inject EHR gap flags, apply -45 confidence penalty (≤50%),
+      and trigger human escalation. Must NOT return "partial results".
+    query: "Summarize the clinical note for Maria J Gonzalez"
+    pdf_source_file: "mock_data/sample_clinical_note.pdf"
+    expected_tools:
+      - tool_get_patient_info
+      - ehr_gap_check
+      - tool_extract_pdf
+    expected_sources:
+      - mock_data/sample_clinical_note.pdf
+    must_contain:
+      - "allergy status could not be verified"
+      - "medication list could not be retrieved"
+      - "ehr"
+    must_not_contain:
+      - "partial results"
+      - "maximum review attempts"
+      - "traceback"
+      - "error"
+    expected_confidence_max: 0.55
+    expected_escalate: true
+    difficulty: "edge_case"
+
+  # ── PR 1: Scenario B — no PDF, unknown patient (hard stop) ───────────────────
+
+  - id: "gs-023"
+    category: "edge_case"
+    description: >
+      Scenario B: Unknown patient, no PDF attached. Must return a clean hard-stop
+      message asking for correct name/ID or to attach documentation.
+      Must NOT loop through auditor (no "partial results").
+    query: "What medications is Jane Doe on?"
+    expected_tools:
+      - tool_get_patient_info
+    expected_sources: []
+    must_contain:
+      - "not found"
+      - "verify"
+      - "attach"
+    must_not_contain:
+      - "partial results"
+      - "maximum review attempts"
+      - "traceback"
+      - "crash"
+    difficulty: "edge_case"
+
+  # ── PR 1: Drug-class allergy conflict ────────────────────────────────────────
+
+  - id: "gs-024"
+    category: "edge_case"
+    description: >
+      Drug-class allergy detection: Emily Rodriguez has a Penicillin allergy.
+      Amoxicillin is a penicillin-class antibiotic. The agent must detect the
+      cross-class conflict even though the drug names don't match exactly.
+    query: "Is it safe to give Emily Rodriguez Amoxicillin?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+      - check_allergy_conflict
+      - tool_check_drug_interactions
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+    must_contain:
+      - "allergy conflict"
+      - "amoxicillin"
+      - "penicillin"
+      - "contraindicated"
+    must_not_contain:
+      - "no known allergy conflict"
+      - "safe to proceed"
+      - "no conflict"
+      - "partial results"
+      - "error"
+    expected_escalate: false
+    difficulty: "edge_case"
+
+  # ── PR 1: No-allergy patient in SAFETY_CHECK (Robert Davis fix) ──────────────
+
+  - id: "gs-025"
+    category: "edge_case"
+    description: >
+      SAFETY_CHECK for a patient with no EHR allergies (Robert Davis, allergies: []).
+      The "no known allergies" synthetic extraction must pass auditor validation
+      without triggering the 3-retry loop. Response must flag the drug interaction
+      (Aspirin + Warfarin) and must NOT return "partial results".
+    query: "Is it safe to give Robert Davis Aspirin?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_medications
+      - check_allergy_conflict
+      - tool_check_drug_interactions
+    expected_sources:
+      - mock_data/patients.json
+      - mock_data/medications.json
+      - mock_data/interactions.json
+    must_contain:
+      - "warfarin"
+      - "aspirin"
+      - "interaction"
+    must_not_contain:
+      - "partial results"
+      - "maximum review attempts"
+      - "insufficient documentation"
+      - "error"
+    difficulty: "edge_case"
+
+  # ── PR 1: EHR gap flags visible in synthesis output ──────────────────────────
+
+  - id: "gs-026"
+    category: "edge_case"
+    description: >
+      When patient is not in EHR but PDF is attached (Scenario A), the synthesized
+      response must surface both EHR gap flags so human reviewers can see exactly
+      why the confidence dropped — not just a low score with no explanation.
+      Uses a realistic-sounding name that does not exist in patients.json to
+      reliably trigger Scenario A (PDF + EHR miss).
+    query: "Summarize the clinical note for Carlos Rivera"
+    pdf_source_file: "mock_data/sample_clinical_note.pdf"
+    expected_tools:
+      - tool_get_patient_info
+      - ehr_gap_check
+      - tool_extract_pdf
+    expected_sources:
+      - mock_data/sample_clinical_note.pdf
+    must_contain:
+      - "no clinical records for"
+      - "ehr_unavailable"
+      - "additional documentation"
+      - "not found"
+    must_not_contain:
+      - "partial results"
+      - "maximum review attempts"
+      - "traceback"
+    expected_confidence_max: 0.55
+    expected_escalate: true
     difficulty: "edge_case"
