@@ -66,11 +66,10 @@ _CHECKPOINT_DB = os.path.join(
 def _get_checkpointer():
     """
     Return a SqliteSaver instance for persistent state checkpointing, or None
-    if the package is unavailable. Failure is non-fatal — the agent continues
-    without persistence rather than refusing to start.
-
-    Returns:
-        SqliteSaver | None: Checkpointer instance or None on import failure.
+    if the package is unavailable. SqliteSaver.from_conn_string() returns a
+    context manager — callers must use it inside a `with` block (see run_workflow
+    and get_state_for_audit). Do not pass the return value of from_conn_string
+    directly to graph.compile(); it causes AttributeError on get_next_version.
     """
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
@@ -375,7 +374,8 @@ def get_state_for_audit(thread_id: str) -> Optional[dict]:
     """
     Retrieve persisted state for a thread from the SQLite checkpointer.
     Used by GET /api/audit/{thread_id} when the in-memory session store does not
-    have the state (e.g. after server restart).
+    have the state (e.g. after server restart). Uses SqliteSaver inside a
+    context manager (from_conn_string returns a context manager, not the saver).
 
     Args:
         thread_id: Session/thread identifier used as thread_id in checkpointer config.
@@ -383,15 +383,16 @@ def get_state_for_audit(thread_id: str) -> Optional[dict]:
     Returns:
         dict | None: AgentState as a plain dict, or None if not found or on error.
     """
+    if not thread_id:
+        return None
     try:
-        checkpointer = _get_checkpointer()
-        if not checkpointer or not thread_id:
-            return None
-        graph = _build_graph(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": thread_id}}
-        snapshot = graph.get_state(config)
-        if snapshot and getattr(snapshot, "values", None):
-            return dict(snapshot.values)
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        with SqliteSaver.from_conn_string(_CHECKPOINT_DB) as checkpointer:
+            graph = _build_graph(checkpointer=checkpointer)
+            config = {"configurable": {"thread_id": thread_id}}
+            snapshot = graph.get_state(config)
+            if snapshot and getattr(snapshot, "values", None):
+                return dict(snapshot.values)
         return None
     except Exception:
         return None
@@ -493,12 +494,11 @@ def run_workflow(
                     if value and not initial_state.get(field):
                         initial_state[field] = value
 
-        checkpointer = _get_checkpointer()
-        graph = _build_graph(checkpointer=checkpointer)
-
-        # Layer 3 — pass thread_id so the checkpointer scopes state to this session.
+        # Layer 3 — SqliteSaver.from_conn_string() returns a context manager; we must
+        # use it inside a `with` block so the graph gets the actual checkpointer,
+        # not the context manager (else: AttributeError on get_next_version).
         invoke_config = {}
-        if checkpointer and session_id:
+        if session_id:
             invoke_config["configurable"] = {"thread_id": session_id}
 
         # LangSmith tracing when API key is set — node-level spans with latency per hop.
@@ -509,7 +509,21 @@ def run_workflow(
             except Exception:
                 pass  # tracing is optional — don't block the pipeline
 
-        result = graph.invoke(initial_state, config=invoke_config if invoke_config else None)
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            with SqliteSaver.from_conn_string(_CHECKPOINT_DB) as checkpointer:
+                graph = _build_graph(checkpointer=checkpointer)
+                result = graph.invoke(
+                    initial_state,
+                    config=invoke_config if invoke_config else None,
+                )
+        except Exception:
+            # Fallback: run without persistence (e.g. package missing or DB error)
+            graph = _build_graph(checkpointer=None)
+            result = graph.invoke(
+                initial_state,
+                config=invoke_config if invoke_config else None,
+            )
 
         result_dict = dict(result)
 
