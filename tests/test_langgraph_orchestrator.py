@@ -783,3 +783,363 @@ class TestPdfRequiredShortCircuit:
             mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(_PATIENT_SPECIFIC)
             result = orchestrator_node(state)
         assert result["data_source_required"] == "EHR"
+
+
+# ── Payer and procedure extraction (new: 2026-02-28) ──────────────────────────
+# These tests validate the payer_name / procedure_identifier fields added to the
+# Haiku schema so the Orchestrator can extract payer and procedure directly from
+# query text, mirroring the patient_name pattern.
+
+_POLICY_CHECK_WITH_PAYER = {
+    "needs_specific_patient": True,
+    "needs_document_evidence": False,
+    "needs_policy_check": True,
+    "needs_denial_analysis": False,
+    "is_general_knowledge": False,
+    "patient_name": "John Smith",
+    "payer_name": "cigna",
+    "procedure_identifier": "27447",
+    "data_source_required": "EHR",
+    "pdf_required": False,
+}
+
+_POLICY_CHECK_PAYER_ONLY = {
+    "needs_specific_patient": True,
+    "needs_document_evidence": False,
+    "needs_policy_check": True,
+    "needs_denial_analysis": False,
+    "is_general_knowledge": False,
+    "patient_name": "John Smith",
+    "payer_name": "aetna",
+    "procedure_identifier": None,
+    "data_source_required": "EHR",
+    "pdf_required": False,
+}
+
+_POLICY_CHECK_PROCEDURE_ONLY = {
+    "needs_specific_patient": True,
+    "needs_document_evidence": False,
+    "needs_policy_check": True,
+    "needs_denial_analysis": False,
+    "is_general_knowledge": False,
+    "patient_name": "John Smith",
+    "payer_name": None,
+    "procedure_identifier": "knee replacement",
+    "data_source_required": "EHR",
+    "pdf_required": False,
+}
+
+# Haiku returns payer_name=None and procedure_identifier=None when
+# needs_policy_check is False (e.g. a general medication query)
+_NON_POLICY_WITH_EMPTY_PAYER = {
+    "needs_specific_patient": True,
+    "needs_document_evidence": False,
+    "needs_policy_check": False,
+    "needs_denial_analysis": False,
+    "is_general_knowledge": False,
+    "patient_name": "John Smith",
+    "payer_name": None,
+    "procedure_identifier": None,
+    "data_source_required": "EHR",
+    "pdf_required": False,
+}
+
+# Policy query where payer mentioned in query but already present in state
+# (e.g. set by the eval runner) — guard must prevent overwrite
+_POLICY_CHECK_PAYER_ALREADY_SET = {
+    "needs_specific_patient": True,
+    "needs_document_evidence": False,
+    "needs_policy_check": True,
+    "needs_denial_analysis": False,
+    "is_general_knowledge": False,
+    "patient_name": "John Smith",
+    "payer_name": "aetna",        # Haiku extracted this from query text
+    "procedure_identifier": "mri",
+    "data_source_required": "EHR",
+    "pdf_required": False,
+}
+
+
+class TestPayerAndProcedureExtraction:
+    """Validate payer_name/procedure_identifier extraction from query text.
+
+    Design rule: When needs_policy_check=True, Haiku extracts payer_name and
+    procedure_identifier from the query (or combined query+clarification_response)
+    exactly as stated. The Orchestrator writes these to state['payer_id'] and
+    state['procedure_code'] with a guard: never overwrite an existing value (so
+    eval-runner-supplied payer_ids are preserved).
+    """
+
+    def test_payer_name_extracted_from_query_written_to_state(self):
+        """When Haiku returns payer_name and state has no payer_id, state['payer_id'] is set."""
+        state = _state_with(input_query="Does John Smith meet Cigna's criteria for 27447?")
+        state["payer_id"] = ""
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_WITH_PAYER
+            )
+            result = orchestrator_node(state)
+        assert result["payer_id"] == "cigna"
+
+    def test_procedure_identifier_extracted_from_query_written_to_state(self):
+        """When Haiku returns procedure_identifier and state has no procedure_code, it is set."""
+        state = _state_with(input_query="Does John Smith meet Cigna's criteria for 27447?")
+        state["procedure_code"] = ""
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_WITH_PAYER
+            )
+            result = orchestrator_node(state)
+        assert result["procedure_code"] == "27447"
+
+    def test_existing_payer_id_in_state_is_not_overwritten(self):
+        """Guard: when state already has payer_id (e.g. set by eval runner), Haiku must not overwrite it."""
+        state = _state_with(input_query="Does John Smith meet Aetna's criteria for MRI?")
+        state["payer_id"] = "cigna"   # already set by caller
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_PAYER_ALREADY_SET
+            )
+            result = orchestrator_node(state)
+        assert result["payer_id"] == "cigna"  # preserved, not overwritten
+
+    def test_existing_procedure_code_in_state_is_not_overwritten(self):
+        """Guard: when state already has procedure_code, Haiku must not overwrite it."""
+        state = _state_with(input_query="Does John Smith meet criteria for MRI?")
+        state["payer_id"] = "cigna"
+        state["procedure_code"] = "27447"   # already set by caller
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_PAYER_ALREADY_SET
+            )
+            result = orchestrator_node(state)
+        assert result["procedure_code"] == "27447"  # preserved
+
+    def test_payer_not_extracted_when_needs_policy_check_false(self):
+        """For non-policy queries (e.g. medication lookup), payer_id must not be set from None."""
+        state = _state_with(input_query="What medications is John Smith on?")
+        state["payer_id"] = ""
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _NON_POLICY_WITH_EMPTY_PAYER
+            )
+            result = orchestrator_node(state)
+        assert result.get("payer_id", "") == ""
+
+    def test_procedure_not_extracted_when_needs_policy_check_false(self):
+        """For non-policy queries, procedure_code must not be set from None."""
+        state = _state_with(input_query="What medications is John Smith on?")
+        state["procedure_code"] = ""
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _NON_POLICY_WITH_EMPTY_PAYER
+            )
+            result = orchestrator_node(state)
+        assert result.get("procedure_code", "") == ""
+
+    def test_payer_only_in_query_sets_payer_id(self):
+        """Query with payer but no procedure → payer_id set, procedure_code left unchanged."""
+        state = _state_with(input_query="What are Aetna's criteria?")
+        state["payer_id"] = ""
+        state["procedure_code"] = ""
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_PAYER_ONLY
+            )
+            result = orchestrator_node(state)
+        assert result["payer_id"] == "aetna"
+        assert result.get("procedure_code", "") == ""
+
+    def test_procedure_only_in_query_sets_procedure_code(self):
+        """Query with procedure but no payer → procedure_code set, payer_id left unchanged."""
+        state = _state_with(input_query="Does John meet criteria for knee replacement?")
+        state["payer_id"] = ""
+        state["procedure_code"] = ""
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_PROCEDURE_ONLY
+            )
+            result = orchestrator_node(state)
+        assert result.get("procedure_code") == "knee replacement"
+        assert result.get("payer_id", "") == ""
+
+    def test_policy_search_still_added_to_plan_when_payer_extracted(self):
+        """Payer extraction must not skip adding policy_search to the tool plan."""
+        state = _state_with(
+            input_query="Does John Smith meet Cigna's criteria for 27447?",
+            payer_policy_cache={},
+        )
+        state["payer_id"] = ""
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_WITH_PAYER
+            )
+            result = orchestrator_node(state)
+        assert "policy_search" in result["tool_plan"]
+
+
+# ── Policy query intent classification (new: 2026-02-28) ─────────────────────
+# These tests cover the bug where a policy query mentioning an imaging modality
+# (e.g. "MRI") was incorrectly classified as pdf_required=True, triggering the
+# PDF gate and preventing policy_search from running.
+#
+# Fix: Haiku prompt now states: when needs_policy_check=True, set
+# data_source_required="EHR" and pdf_required=False unless the query explicitly
+# references an attached document.
+
+_POLICY_CHECK_MRI_PROCEDURE = {
+    # "Does John Smith meet Aetna's criteria for MRI?" — MRI is the SUBJECT
+    # of the auth request, not a request to read an MRI report.
+    # After our Haiku prompt fix, this should produce pdf_required=False.
+    "needs_specific_patient": True,
+    "needs_document_evidence": False,
+    "needs_policy_check": True,
+    "needs_denial_analysis": False,
+    "is_general_knowledge": False,
+    "patient_name": "John Smith",
+    "payer_name": "aetna",
+    "procedure_identifier": "mri",
+    "data_source_required": "EHR",
+    "pdf_required": False,          # correct: MRI is the procedure, not a doc source
+}
+
+_POLICY_CHECK_WITH_EXPLICIT_DOC_REF = {
+    # "Does the patient in this chart meet Cigna criteria for knee replacement?"
+    # Explicit "this chart" → pdf_required=True is correct.
+    "needs_specific_patient": True,
+    "needs_document_evidence": True,
+    "needs_policy_check": True,
+    "needs_denial_analysis": False,
+    "is_general_knowledge": False,
+    "patient_name": None,
+    "payer_name": "cigna",
+    "procedure_identifier": "knee replacement",
+    "data_source_required": "PDF",
+    "pdf_required": True,
+}
+
+_IMAGING_READ_QUERY = {
+    # "What does John Smith's MRI show?" — asking to READ imaging results
+    # not a policy/criteria check.  pdf_required=True is correct here.
+    "needs_specific_patient": True,
+    "needs_document_evidence": True,
+    "needs_policy_check": False,
+    "needs_denial_analysis": False,
+    "is_general_knowledge": False,
+    "patient_name": "John Smith",
+    "payer_name": None,
+    "procedure_identifier": None,
+    "data_source_required": "IMAGING",
+    "pdf_required": True,
+}
+
+
+class TestPolicyQueryClassification:
+    """
+    Validate correct orchestrator behaviour for policy queries that include
+    an imaging modality or procedure name — distinguishing between:
+      1. "Does patient meet criteria for MRI?"  → EHR + pdf_required=False
+      2. "What does patient's MRI show?"        → IMAGING + pdf_required=True
+      3. "Does this chart meet Cigna criteria?" → PDF + pdf_required=True
+    """
+
+    def test_policy_query_with_imaging_procedure_not_blocked(self):
+        """Policy query with 'MRI' as the procedure name must NOT set source_unavailable.
+
+        After the Haiku prompt fix, needs_policy_check=True + pdf_required=False
+        must flow through to policy_search without hitting the PDF gate.
+        """
+        state = _state_with(
+            input_query="Does John Smith meet Aetna's criteria for MRI?",
+            pdf_source_file="",     # no PDF attached
+            payer_policy_cache={},
+        )
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_MRI_PROCEDURE
+            )
+            result = orchestrator_node(state)
+        assert result.get("source_unavailable") is not True
+        assert "policy_search" in result["tool_plan"]
+
+    def test_policy_query_with_imaging_procedure_adds_patient_lookup(self):
+        """Policy query about an EHR patient (MRI as procedure) adds patient_lookup."""
+        state = _state_with(
+            input_query="Does John Smith meet Aetna's criteria for MRI?",
+            payer_policy_cache={},
+        )
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_MRI_PROCEDURE
+            )
+            result = orchestrator_node(state)
+        assert "patient_lookup" in result["tool_plan"]
+
+    def test_imaging_read_query_sets_source_unavailable_without_pdf(self):
+        """Query asking to READ imaging results without an attached PDF → source_unavailable.
+
+        This is the *other* scenario — genuinely asking to read an MRI report,
+        not a prior-auth criteria check.
+        """
+        state = _state_with(
+            input_query="What does John Smith's MRI show?",
+            pdf_source_file="",
+        )
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _IMAGING_READ_QUERY
+            )
+            result = orchestrator_node(state)
+        assert result.get("source_unavailable") is True
+        assert result.get("source_unavailable_reason") == "IMAGING"
+
+    def test_policy_query_with_explicit_doc_phrase_blocked_without_pdf(self):
+        """Query with 'this chart' phrase (explicit doc reference) and no PDF → source_unavailable.
+
+        'This chart' is a genuine signal that the user wants to read an attached
+        document — the PDF gate should fire.
+        """
+        state = _state_with(
+            input_query="Does the patient in this chart meet Cigna criteria for knee replacement?",
+            pdf_source_file="",
+        )
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_WITH_EXPLICIT_DOC_REF
+            )
+            result = orchestrator_node(state)
+        assert result.get("source_unavailable") is True
+
+    def test_policy_query_with_explicit_doc_phrase_proceeds_with_pdf(self):
+        """Query with 'this chart' phrase + PDF attached → no PDF gate, pipeline continues."""
+        import tempfile, os as _os
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(b"chart content for criteria check")
+            pdf_path = f.name
+        try:
+            state = _state_with(
+                input_query="Does the patient in this chart meet Cigna criteria for knee replacement?",
+                pdf_source_file=pdf_path,
+                payer_policy_cache={},
+            )
+            with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+                mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                    _POLICY_CHECK_WITH_EXPLICIT_DOC_REF
+                )
+                result = orchestrator_node(state)
+            assert result.get("source_unavailable") is not True
+        finally:
+            _os.unlink(pdf_path)
+
+    def test_data_source_ehr_for_policy_query_with_imaging_procedure(self):
+        """Policy query with imaging procedure name → data_source_required must be EHR."""
+        state = _state_with(
+            input_query="Does John Smith meet Aetna's criteria for MRI?",
+            payer_policy_cache={},
+        )
+        with patch("langgraph_agent.orchestrator_node.ChatAnthropic") as mock_llm_cls:
+            mock_llm_cls.return_value.invoke.return_value = _make_haiku_response(
+                _POLICY_CHECK_MRI_PROCEDURE
+            )
+            result = orchestrator_node(state)
+        assert result["data_source_required"] == "EHR"

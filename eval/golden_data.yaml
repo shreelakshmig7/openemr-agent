@@ -1,7 +1,8 @@
 # golden_data.yaml
 # AgentForge — Healthcare RCM AI Agent — Eval Dataset
 # Gauntlet YAML format
-# 52 test cases: 10 happy_path, 16 edge_case, 7 adversarial, 17 pdf_clinical (PR 3)
+# 57 test cases: 10 happy_path, 16 edge_case, 7 adversarial, 17 pdf_clinical (PR 3),
+#   5 policy_extraction (gs-053 to gs-057)
 # PR 1 additions (gs-019 to gs-026): pdf_extractor, denial_analyzer, drug-class allergy,
 #   EHR confidence penalty (Scenario A), Scenario B hard stop.
 # PR 2 additions (gs-027 to gs-033): non-existent patient ID/MRN rejection,
@@ -14,6 +15,10 @@
 #   drug diagnosis match, treatment contradictions, review loops, laterality,
 #   anti-hallucination guardrails, state persistence, allergy contraindications,
 #   drug interactions, and out-of-domain adversarial queries.
+# PR 4 additions (gs-053 to gs-057): payer/procedure extraction from query text,
+#   imaging-procedure classification fix (MRI not blocked by PDF gate),
+#   patient-not-in-EHR + PDF policy query (Scenario A variant),
+#   no-payer-mentioned graceful fallback, procedure-as-description extraction.
 # New optional fields:
 #   pdf_source_file        — PDF path passed to run_workflow (reproducible: mock_data/ only)
 #   expected_confidence_max — pass if confidence_score <= this value
@@ -1235,3 +1240,127 @@ test_cases:
       - "mismatch"
       - "traceback"
     difficulty: "pdf_clinical"
+
+  # ── PR 4: Payer / procedure extraction from query text ───────────────────────
+  # gs-034/035 always pass payer_id explicitly via the eval runner, so they never
+  # exercise the new Orchestrator extraction path (Haiku payer_name field).
+  # These cases omit payer_id / procedure_code so the Orchestrator must extract
+  # them directly from the query text.
+
+  - id: "gs-053"
+    category: "policy_extraction"
+    description: >
+      Payer extracted from query text (no explicit payer_id supplied).
+      Orchestrator must use Haiku to extract "cigna" from the query and write it
+      to state["payer_id"] so policy_search can run.  Result must include Cigna
+      policy criteria — not a no-policy-found message.
+    query: "Does John Smith meet Cigna's criteria for knee replacement?"
+    pdf_source_file: "mock_data/AgentForge_Test_ClinicalNote.pdf"
+    # payer_id intentionally omitted — extraction from query text is what we test
+    expected_tools:
+      - tool_get_patient_info
+      - tool_search_policy
+    must_contain:
+      - "Cigna"
+      - "criteria"
+    must_not_contain:
+      - "no policy found"
+      - "not available"
+      - "error"
+      - "traceback"
+    difficulty: "policy_extraction"
+
+  - id: "gs-054"
+    category: "policy_extraction"
+    description: >
+      Policy query with an imaging procedure name (MRI) must NOT be blocked by the
+      PDF gate.  "Criteria for MRI" means MRI is the procedure being authorized, not
+      a request to read an attached MRI report.  The Orchestrator must classify this
+      as data_source_required=EHR and pdf_required=false, so policy_search runs
+      even though no PDF is attached.  Known payer (aetna) is in mock data.
+    query: "Does John Smith meet Aetna's criteria for MRI?"
+    # no pdf_source_file — intentional, tests the classification fix
+    payer_id: "aetna"
+    procedure_code: "mri"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_search_policy
+    must_contain:
+      - "criteria"
+      - "Aetna"
+    must_not_contain:
+      - "attach"
+      - "upload"
+      - "no document"
+      - "pdf required"
+      - "traceback"
+    difficulty: "policy_extraction"
+
+  - id: "gs-055"
+    category: "policy_extraction"
+    description: >
+      Scenario A variant: patient not found in EHR mock data but a prior-auth PDF
+      is attached.  Policy query should still proceed — pdf_extractor runs as
+      fallback for clinical evidence, and policy_search evaluates payer criteria
+      using evidence extracted from the PDF.  Response must not claim the patient
+      does not exist without offering PDF-based assessment.
+    query: "Does Maria J. Gonzalez meet Cigna criteria for knee replacement?"
+    pdf_source_file: "mock_data/AgentForge_Test_PriorAuth.pdf"
+    payer_id: "cigna"
+    procedure_code: "27447"
+    expected_tools:
+      - tool_extract_pdf
+      - tool_search_policy
+    must_contain:
+      - "criteria"
+    must_not_contain:
+      - "patient not found"
+      - "cannot answer"
+      - "traceback"
+      - "error"
+    difficulty: "policy_extraction"
+
+  - id: "gs-056"
+    category: "policy_extraction"
+    description: >
+      Policy query with no payer mentioned and no payer_id supplied.  The agent
+      must not crash or hallucinate a payer.  Expected outcome: policy_search runs
+      but returns a no_policy_found response (empty payer_id → no match in mock
+      data), and the response asks the user to specify a payer or reports that
+      criteria are unavailable without a payer name.
+    query: "Does John Smith meet criteria for knee replacement?"
+    pdf_source_file: "mock_data/AgentForge_Test_ClinicalNote.pdf"
+    # payer_id intentionally omitted — no payer in query text either
+    procedure_code: "27447"
+    expected_tools:
+      - tool_get_patient_info
+    must_contain:
+      - "criteria"
+    must_not_contain:
+      - "Cigna Medical Policy #012"
+      - "traceback"
+      - "crash"
+    difficulty: "edge_case"
+
+  - id: "gs-057"
+    category: "policy_extraction"
+    description: >
+      Procedure extracted as a description (not a CPT code) from query text.
+      "Total knee arthroplasty" should be accepted as procedure_identifier and
+      passed to policy_search.  The tool must not crash on a non-numeric procedure
+      string; Cigna criteria must still be retrieved and evaluated.
+    query: "Does John Smith meet Cigna's criteria for total knee arthroplasty?"
+    pdf_source_file: "mock_data/AgentForge_Test_ClinicalNote.pdf"
+    payer_id: "cigna"
+    # procedure_code intentionally omitted — tests description-form extraction
+    expected_tools:
+      - tool_get_patient_info
+      - tool_search_policy
+    must_contain:
+      - "Cigna"
+      - "criteria"
+    must_not_contain:
+      - "invalid procedure"
+      - "error"
+      - "traceback"
+    difficulty: "policy_extraction"

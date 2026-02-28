@@ -81,9 +81,17 @@ def load_denial_patterns() -> List[dict]:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+_POLICY_CRITERIA_FLAGS = {"CRITERIA_MET", "CRITERIA_UNMET"}
+
+
 def _build_search_text(extractions: List[dict]) -> str:
     """
     Combine all extraction claim and citation text into one lowercase search string.
+
+    Policy criteria entries (CRITERIA_MET / CRITERIA_UNMET) are excluded from
+    the search text. Their descriptions contain procedure and documentation
+    vocabulary that would produce false-positive denial pattern matches. The LLM
+    still sees these entries in extractions — only denial keyword matching skips them.
 
     Args:
         extractions: List of extraction dicts from the extractor node.
@@ -96,9 +104,12 @@ def _build_search_text(extractions: List[dict]) -> str:
     """
     parts = []
     for ext in extractions:
-        if isinstance(ext, dict):
-            parts.append(ext.get("claim", ""))
-            parts.append(ext.get("citation", ""))
+        if not isinstance(ext, dict):
+            continue
+        if ext.get("flag") in _POLICY_CRITERIA_FLAGS:
+            continue
+        parts.append(ext.get("claim", ""))
+        parts.append(ext.get("citation", ""))
     return " ".join(parts).lower()
 
 

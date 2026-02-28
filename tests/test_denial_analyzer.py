@@ -281,3 +281,97 @@ def test_analyze_no_false_positive_on_common_words():
     result = analyze_denial_risk(extractions)
     assert result["success"] is True
     assert result["risk_level"] not in ("HIGH", "CRITICAL")
+
+
+# ── Policy criteria flag filtering ────────────────────────────────────────────
+
+def test_criteria_met_flag_excluded_from_denial_search():
+    """CRITERIA_MET entries must not contribute to denial keyword matching.
+
+    Criterion descriptions contain words like 'procedure', 'surgery', 'missing'
+    that would produce false-positive HIGH/CRITICAL denial scores if included.
+    """
+    extractions = [
+        {
+            "claim": "[Cigna Medical Policy #012] Criteria A NOT MET: Conservative therapy failure. "
+                     "Patient must have completed a minimum of 3 months of supervised physical therapy "
+                     "or conservative management including NSAIDs, corticosteroid injections, "
+                     "or activity modification. Documentation must include therapy dates.",
+            "citation": "policy_search:cigna",
+            "source": "policy_search",
+            "synthetic": True,
+            "flag": "CRITERIA_MET",
+        }
+    ]
+    result = analyze_denial_risk(extractions)
+    assert result["success"] is True
+    assert result["risk_level"] in ("NONE", "LOW")
+
+
+def test_criteria_unmet_flag_excluded_from_denial_search():
+    """CRITERIA_UNMET entries must not produce false-positive denial pattern matches.
+
+    'Procedure', 'surgery', 'missing', 'documentation' in unmet criteria text
+    must not trigger DP001 (PRIOR_AUTH_MISSING) or DP004 (INCOMPLETE_DOCUMENTATION).
+    """
+    extractions = [
+        {
+            "claim": "[Cigna Medical Policy #012] Criteria B NOT MET: Radiographic evidence of "
+                     "severe osteoarthritis required. Missing imaging report — surgery not yet "
+                     "authorized. Procedure 27447 requires documentation.",
+            "citation": "policy_search:cigna",
+            "source": "policy_search",
+            "synthetic": True,
+            "flag": "CRITERIA_UNMET",
+        }
+    ]
+    result = analyze_denial_risk(extractions)
+    assert result["success"] is True
+    assert result["risk_level"] in ("NONE", "LOW")
+    codes = [p["code"] for p in result["matched_patterns"]]
+    assert "PRIOR_AUTH_MISSING" not in codes
+    assert "INCOMPLETE_DOCUMENTATION" not in codes
+
+
+def test_real_ehr_claims_still_trigger_denial_alongside_criteria():
+    """When real EHR claims AND criteria entries are mixed, only EHR claims drive denial score.
+
+    Criteria entries are excluded but real allergy/interaction claims are not.
+    """
+    extractions = [
+        {
+            "claim": "Drug interaction detected: Warfarin + Aspirin — severity HIGH. Bleeding risk.",
+            "citation": "Warfarin and Aspirin: HIGH severity interaction",
+            "source": "mock_data/interactions.json",
+            "verbatim": True,
+        },
+        {
+            "claim": "[Cigna Medical Policy #012] Criteria C NOT MET: BMI must be recorded. "
+                     "Missing documentation. Procedure authorization incomplete.",
+            "citation": "policy_search:cigna",
+            "source": "policy_search",
+            "synthetic": True,
+            "flag": "CRITERIA_UNMET",
+        },
+    ]
+    result = analyze_denial_risk(extractions)
+    assert result["success"] is True
+    assert result["risk_level"] in ("HIGH", "CRITICAL")
+    codes = [p["code"] for p in result["matched_patterns"]]
+    assert "DRUG_INTERACTION_HIGH" in codes
+    assert "INCOMPLETE_DOCUMENTATION" not in codes
+
+
+def test_no_policy_found_flag_still_feeds_denial_analyzer():
+    """NO_POLICY_FOUND entries are NOT filtered — only CRITERIA_MET/UNMET are excluded."""
+    extractions = [
+        {
+            "claim": "No policy criteria found for payer 'humana'. Authorization criteria not available.",
+            "citation": "policy_search:humana",
+            "source": "policy_search",
+            "synthetic": True,
+            "flag": "NO_POLICY_FOUND",
+        }
+    ]
+    result = analyze_denial_risk(extractions)
+    assert result["success"] is True

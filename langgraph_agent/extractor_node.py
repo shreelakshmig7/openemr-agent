@@ -674,8 +674,8 @@ def extractor_node(state: AgentState) -> AgentState:
         # Step 4b — Policy search (if in tool_plan).
         if "policy_search" in tool_plan:
             policy_result = tool_search_policy(
-                payer_id=state.get("payer_id", "cigna"),
-                procedure_code=state.get("procedure_code", "27447"),
+                payer_id=state.get("payer_id", ""),
+                procedure_code=state.get("procedure_code", ""),
                 extractions=all_extractions,
             )
             tool_trace.append({
@@ -707,6 +707,34 @@ def extractor_node(state: AgentState) -> AgentState:
                     "synthetic": True,
                     "flag": "NO_POLICY_FOUND",
                 })
+            else:
+                # Surface each criterion (met or unmet) so the LLM can name them.
+                # Without this, a 0/5 criteria_met result gives the LLM nothing to
+                # reason about and it falls back to generic "I cannot determine."
+                _payer_id = state.get("payer_id", "")
+                _policy_id = policy_result.get("policy_id", "")
+                for criterion in policy_result.get("criteria_met", []):
+                    all_extractions.append({
+                        "claim": (
+                            f"[{_policy_id}] Criteria {criterion.get('id')} MET: "
+                            f"{criterion.get('description', '')}"
+                        ),
+                        "citation": f"policy_search:{_payer_id}",
+                        "source": "policy_search",
+                        "synthetic": True,
+                        "flag": "CRITERIA_MET",
+                    })
+                for criterion in policy_result.get("criteria_unmet", []):
+                    all_extractions.append({
+                        "claim": (
+                            f"[{_policy_id}] Criteria {criterion.get('id')} NOT MET: "
+                            f"{criterion.get('description', '')}"
+                        ),
+                        "citation": f"policy_search:{_payer_id}",
+                        "source": "policy_search",
+                        "synthetic": True,
+                        "flag": "CRITERIA_UNMET",
+                    })
             if isinstance(state.get("payer_policy_cache"), dict):
                 state["payer_policy_cache"][state.get("payer_id", "")] = policy_result
 

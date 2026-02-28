@@ -427,3 +427,133 @@ class TestPdfContentHashCache:
             assert page_numbers == {1, 2, 3}   # not {None}
         finally:
             os.unlink(pdf_path)
+
+
+# ── Policy criteria surfacing in extractions ──────────────────────────────────
+# Tests that policy_search results (met and unmet criteria) are added to
+# all_extractions so the LLM response can name specific criteria instead of
+# falling back to generic "I cannot determine" when criteria_met_count is 0.
+
+class TestPolicyCriteriaSurfacing:
+    """
+    Regression: before fix, extractor only added a claim for no_policy_found.
+    When a known payer returned 0/5 criteria met, the LLM received only the
+    count summary (via tool_trace) and had no criterion text to reason about,
+    producing generic fallback responses.
+
+    After fix: each criterion (met and unmet) is added to all_extractions with
+    a CRITERIA_MET or CRITERIA_UNMET flag and a description, giving the LLM
+    the concrete text needed to list what's missing.
+    """
+
+    _POLICY_MET = {
+        "success": True,
+        "policy_id": "Cigna Medical Policy #012",
+        "criteria_met": [
+            {"id": "A", "description": "Conservative therapy failure documented.", "evidence": "3 months PT noted."},
+        ],
+        "criteria_unmet": [
+            {"id": "B", "description": "Radiographic evidence of severe osteoarthritis required.", "evidence": "See clinical documentation"},
+            {"id": "C", "description": "BMI below 40 must be recorded by treating physician.", "evidence": "See clinical documentation"},
+        ],
+        "source": "mock",
+        "error": None,
+    }
+
+    _POLICY_ALL_UNMET = {
+        "success": True,
+        "policy_id": "Cigna Medical Policy #012",
+        "criteria_met": [],
+        "criteria_unmet": [
+            {"id": "A", "description": "Conservative therapy failure documented.", "evidence": "See clinical documentation"},
+            {"id": "B", "description": "Radiographic evidence of severe osteoarthritis required.", "evidence": "See clinical documentation"},
+            {"id": "C", "description": "BMI below 40 must be recorded by treating physician.", "evidence": "See clinical documentation"},
+            {"id": "D", "description": "Surgeon must be board-certified orthopedic surgeon.", "evidence": "See clinical documentation"},
+            {"id": "E", "description": "Failure of viscosupplementation injections.", "evidence": "See clinical documentation"},
+        ],
+        "source": "mock",
+        "error": None,
+    }
+
+    def _run_with_policy(self, policy_result):
+        state = create_initial_state("Does John Smith meet Cigna criteria for knee replacement?")
+        state["orchestrator_ran"] = True
+        state["tool_plan"] = ["patient_lookup", "med_retrieval", "policy_search"]
+        state["identified_patient_name"] = "John Smith"
+        state["payer_id"] = "cigna"
+        state["procedure_code"] = "knee replacement"
+        state["payer_policy_cache"] = {}
+        with patch("langgraph_agent.extractor_node.tool_get_patient_info", return_value=MOCK_PATIENT), \
+             patch("langgraph_agent.extractor_node.tool_get_medications", return_value=MOCK_MEDICATIONS), \
+             patch("langgraph_agent.extractor_node.tool_check_drug_interactions", return_value=MOCK_INTERACTIONS), \
+             patch("langgraph_agent.extractor_node.tool_search_policy", return_value=policy_result):
+            return extractor_node(state)
+
+    def test_criteria_met_added_to_extractions(self):
+        """Met criteria are added to extractions with flag=CRITERIA_MET."""
+        result = self._run_with_policy(self._POLICY_MET)
+        met_entries = [e for e in result["extractions"] if e.get("flag") == "CRITERIA_MET"]
+        assert len(met_entries) == 1
+        assert "A" in met_entries[0]["claim"]
+        assert "MET" in met_entries[0]["claim"]
+
+    def test_criteria_unmet_added_to_extractions(self):
+        """Unmet criteria are added to extractions with flag=CRITERIA_UNMET."""
+        result = self._run_with_policy(self._POLICY_MET)
+        unmet_entries = [e for e in result["extractions"] if e.get("flag") == "CRITERIA_UNMET"]
+        assert len(unmet_entries) == 2
+        ids = {e["claim"].split("Criteria ")[1][0] for e in unmet_entries}
+        assert ids == {"B", "C"}
+
+    def test_all_unmet_all_surfaced(self):
+        """When all 5 criteria are unmet (0/5 scenario), all 5 are added to extractions."""
+        result = self._run_with_policy(self._POLICY_ALL_UNMET)
+        unmet_entries = [e for e in result["extractions"] if e.get("flag") == "CRITERIA_UNMET"]
+        assert len(unmet_entries) == 5
+
+    def test_criteria_claims_include_policy_id(self):
+        """Each criteria claim includes the policy_id so the LLM can cite it."""
+        result = self._run_with_policy(self._POLICY_MET)
+        policy_entries = [
+            e for e in result["extractions"]
+            if e.get("flag") in ("CRITERIA_MET", "CRITERIA_UNMET")
+        ]
+        for entry in policy_entries:
+            assert "Cigna Medical Policy #012" in entry["claim"]
+
+    def test_criteria_source_is_policy_search(self):
+        """Criteria extractions are sourced from policy_search, not patients.json."""
+        result = self._run_with_policy(self._POLICY_MET)
+        policy_entries = [
+            e for e in result["extractions"]
+            if e.get("flag") in ("CRITERIA_MET", "CRITERIA_UNMET")
+        ]
+        for entry in policy_entries:
+            assert entry["source"] == "policy_search"
+
+    def test_criteria_citation_includes_payer_id(self):
+        """Each criteria extraction has a citation referencing the payer."""
+        result = self._run_with_policy(self._POLICY_MET)
+        policy_entries = [
+            e for e in result["extractions"]
+            if e.get("flag") in ("CRITERIA_MET", "CRITERIA_UNMET")
+        ]
+        for entry in policy_entries:
+            assert "cigna" in entry["citation"]
+
+    def test_no_policy_found_still_adds_message_claim(self):
+        """no_policy_found path still adds the message claim as before (no regression)."""
+        no_policy = {
+            "success": True,
+            "policy_id": None,
+            "criteria_met": [],
+            "criteria_unmet": [],
+            "source": "mock",
+            "no_policy_found": True,
+            "message": "No policy criteria found for payer 'humana'.",
+            "error": None,
+        }
+        result = self._run_with_policy(no_policy)
+        no_policy_entries = [e for e in result["extractions"] if e.get("flag") == "NO_POLICY_FOUND"]
+        assert len(no_policy_entries) == 1
+        assert "humana" in no_policy_entries[0]["claim"]

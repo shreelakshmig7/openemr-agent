@@ -77,6 +77,8 @@ Fields to return:
     "needs_denial_analysis": true/false,
     "is_general_knowledge": true/false,
     "patient_name": "Full Name" or null,
+    "payer_name": "payer name or ID as stated in query (lowercase)" or null,
+    "procedure_identifier": "CPT code or procedure description as stated in query" or null,
     "data_source_required": "EHR" or "PDF" or "RESIDENT_NOTE" or "IMAGING" or "NONE",
     "pdf_required": true/false
 }
@@ -100,6 +102,17 @@ Rules:
   rather than by name, return that identifier verbatim as patient_name.
   Return null if no name or identifier is stated — do NOT resolve identifiers
   to names from prior context.
+- payer_name: Only populate when needs_policy_check is true.
+  Extract the payer/insurer name or ID exactly as stated in the query.
+  Return lowercase (e.g. "Cigna" → "cigna", "Aetna" → "aetna", "BCB001" → "bcb001").
+  Accept both name ("Cigna") and payer ID ("BCB001") — return whichever is stated.
+  Return null if no payer is mentioned or needs_policy_check is false.
+- procedure_identifier: Only populate when needs_policy_check is true.
+  Extract the CPT code if explicitly stated (e.g. "27447", "99213"),
+  or the procedure description if no code is given (e.g. "knee replacement",
+  "total hip arthroplasty"). Return the value exactly as stated — do NOT
+  translate descriptions to CPT codes. Return null if no procedure is mentioned
+  or needs_policy_check is false.
 - data_source_required: The primary data source the query needs.
   "EHR" — medications, allergies, patient demographics.
   "PDF" — clinical notes, charts, or attached documents (generic).
@@ -111,7 +124,19 @@ Rules:
     Use "IMAGING" only when the query asks for a standalone radiology
     report or separate imaging file, not a section of a clinical document.
   "NONE" — general knowledge questions with no specific source needed.
-- pdf_required: true if data_source_required is PDF, RESIDENT_NOTE, or IMAGING.
+  IMPORTANT — policy check override: When needs_policy_check is true,
+    ALWAYS set data_source_required to "EHR" and pdf_required to false,
+    UNLESS the query explicitly references an attached document using phrases
+    such as: "this chart", "this document", "this PDF", "this note",
+    "the attached note", "the attached document", "the attached chart",
+    "attached doc", "attached chart", "above doc", "above attachment",
+    "uploaded doc", "uploaded chart", "the note above".
+    The procedure name alone (MRI, knee replacement, Palbociclib, CT scan)
+    is NOT a signal to require a document — it is the subject of the criteria
+    check, not a data source. Do NOT set pdf_required: true just because
+    a procedure or imaging modality is mentioned in a policy/criteria query.
+- pdf_required: true if data_source_required is PDF, RESIDENT_NOTE, or IMAGING
+  AND the above policy check override does not apply.
   false otherwise.
 
 Examples:
@@ -129,7 +154,29 @@ Examples:
 
   "Does this chart support Cigna's criteria for knee replacement?"
     → needs_document_evidence: true, needs_policy_check: true,
-      data_source_required: "PDF", pdf_required: true, patient_name: null
+      data_source_required: "PDF", pdf_required: true, patient_name: null,
+      payer_name: "cigna", procedure_identifier: "knee replacement"
+    (pdf_required: true because query explicitly says "this chart")
+
+  "Does John Smith meet Aetna's criteria for MRI?"
+    → needs_specific_patient: true, needs_policy_check: true,
+      patient_name: "John Smith", payer_name: "aetna",
+      procedure_identifier: "mri", data_source_required: "EHR",
+      pdf_required: false
+    (pdf_required: false — "MRI" is the procedure being authorized,
+     NOT a request to read an MRI scan report)
+
+  "What does John Smith's MRI show?"
+    → needs_specific_patient: true, needs_policy_check: false,
+      patient_name: "John Smith", data_source_required: "IMAGING",
+      pdf_required: true
+    (pdf_required: true — query asks to READ imaging results)
+
+  "Does John Smith meet criteria for procedure 27447 with BCB001?"
+    → needs_specific_patient: true, needs_policy_check: true,
+      patient_name: "John Smith", payer_name: "bcb001",
+      procedure_identifier: "27447", data_source_required: "EHR",
+      pdf_required: false
 
   "What are his allergies?"
     → needs_specific_patient: true, patient_name: null,
@@ -168,6 +215,8 @@ def _classify_query(query: str, prior_context: dict) -> dict:
         "needs_denial_analysis": False,
         "is_general_knowledge": False,
         "patient_name": None,
+        "payer_name": None,
+        "procedure_identifier": None,
         "data_source_required": "EHR",
         "pdf_required": False,
     }
@@ -426,6 +475,24 @@ def orchestrator_node(state: AgentState) -> AgentState:
         state["orchestrator_fallback"] = False
         state["data_source_required"] = intent.get("data_source_required", "EHR")
         state["is_general_knowledge"] = bool(intent.get("is_general_knowledge", False))
+
+        # ── Payer and procedure extraction ─────────────────────────────────
+        # Mirror the patient_name pattern: Haiku extracts payer/procedure from
+        # the query (or the combined query+clarification_response text built
+        # above), and we write it to state exactly as stated.
+        # Guard: only when needs_policy_check=true, and only when the caller
+        # has not already supplied a value (e.g. eval runner sends payer_id
+        # explicitly — we must not overwrite it).
+        if intent.get("needs_policy_check"):
+            payer_name = (intent.get("payer_name") or "").strip().lower()
+            if payer_name and not state.get("payer_id"):
+                state["payer_id"] = payer_name
+                logger.info("Orchestrator: extracted payer_id '%s' from query", payer_name)
+
+            proc_id = (intent.get("procedure_identifier") or "").strip()
+            if proc_id and not state.get("procedure_code"):
+                state["procedure_code"] = proc_id
+                logger.info("Orchestrator: extracted procedure_code '%s' from query", proc_id)
 
         # ── Pronoun resolution ─────────────────────────────────────────────
         # When Haiku returns patient_name=null (pronoun like "he", "she", "his"),
