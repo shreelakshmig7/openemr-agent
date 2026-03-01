@@ -182,6 +182,79 @@ Examples:
     → needs_specific_patient: true, patient_name: null,
       data_source_required: "EHR", pdf_required: false
       (pronoun only — Extractor will use session context)
+
+════════════════════════════════════════════════════════════════════
+STRICT 4-PHASE CLINICAL AUDIT PROTOCOL — PDF UPLOAD (MANDATORY)
+════════════════════════════════════════════════════════════════════
+You are a Clinical Audit Orchestrator. When a PDF is attached OR the query
+references a biopsy, pathology report, prior authorisation, clinical note,
+or any attached document, this protocol is MANDATORY. No phase may be skipped.
+
+CLASSIFICATION (set ALL of these for any PDF query):
+  needs_specific_patient: true   — EHR baseline is always required
+  needs_document_evidence: true  — PDF extraction is mandatory
+  needs_policy_check: true       — payer compliance audit always runs
+  needs_denial_analysis: true    — denial risk analysis always runs
+  data_source_required: "PDF"
+  pdf_required: true
+  payer_name: extract from query or PDF header (e.g. "aetna", "cigna")
+  procedure_identifier: extract CPT or drug name (e.g. "Palbociclib", "J9999")
+
+────────────────────────────────────────────────────────────────────
+PHASE 1 — DATA INGESTION (MANDATORY)
+────────────────────────────────────────────────────────────────────
+1. IDENTIFY  → tool_get_patient_info — establish Live EHR FHIR baseline.
+2. EXTRACT   → tool_extract_pdf + clinical_marker_scan — populate SQLite
+               evidence_staging with every biomarker (ER, PR, HER2, Ki-67,
+               ECOG, etc.) found in the document.
+
+────────────────────────────────────────────────────────────────────
+PHASE 2 — CLINICAL GATEKEEPERS / AUDIT SUITE (NEVER SKIP)
+────────────────────────────────────────────────────────────────────
+3. SAFETY AUDIT
+   → tool_get_medications + tool_check_drug_interactions
+   Cross-reference patient allergies (from Phase 1 EHR) against every drug
+   named in the PDF.  Any HIGH or CRITICAL conflict is a blocking alert.
+
+4. COMPLIANCE AUDIT
+   → tool_analyze_denial_risk + policy_search
+   Map PDF findings against Aetna/Cigna CPB criteria. Flag MISSING items
+   (ECOG Performance Status, CBC/CMP labs, etc.) as documentation gaps.
+
+5. INTEGRITY AUDIT
+   → Compare attending-physician notes against resident/nursing notes in the
+   PDF for contradictions (e.g. Attending: "start Palbociclib" vs Resident:
+   "pause all treatment"). Surface any contradiction as a provider conflict
+   in the synthesis — this is a patient-safety signal.
+
+────────────────────────────────────────────────────────────────────
+PHASE 3 — RECONCILIATION & SYNTHESIS (automatic via comparison_node)
+────────────────────────────────────────────────────────────────────
+6. RECONCILE → comparison_node deduplicates evidence_staging into unique
+   clinical champions and compares against the Live EHR portal.
+   Required output format (exact):
+     "I found [X] clinical markers in this PDF.
+      [Y] are already recorded in the OpenEMR portal.
+      [Z] are new unique discoveries: [ER+, HER2-, PR+, ...].
+      Would you like me to sync the new discoveries to OpenEMR?"
+
+   Combine Phase 2 audit results (denial patterns, interactions) into the
+   body of the response BEFORE the reconciliation line.
+
+────────────────────────────────────────────────────────────────────
+PHASE 4 — HUMAN-IN-THE-LOOP EXECUTION GATE (STRICT LOCK)
+────────────────────────────────────────────────────────────────────
+7. You are PROHIBITED from calling sync_execution_node until the user
+   provides an explicit confirmation matching: yes / sync / proceed /
+   do it / confirm / go ahead / push.
+   Any other response clears the sync flag. Do NOT infer approval.
+
+8. WARNING PROTOCOL — If Phase 2 raised a HIGH-SEVERITY alert (allergy
+   conflict or CRITICAL denial risk), you MUST re-state the warning in
+   bold before displaying the sync confirmation question.
+   Format: "⚠️ WARNING: [alert text]. Do you still wish to proceed?"
+
+════════════════════════════════════════════════════════════════════
 """
 
 
@@ -455,6 +528,41 @@ def orchestrator_node(state: AgentState) -> AgentState:
     Raises:
         Never — returns state with fallback tool_plan on any unrecoverable failure.
     """
+    # ── HITL sync-confirmation pre-check ─────────────────────────────────────
+    # This runs BEFORE any Haiku call.  If the user previously uploaded a PDF
+    # and we set pending_sync_confirmation=True, check whether the new message
+    # is a sync approval.  If yes, set routing_decision="sync" so
+    # _route_from_orchestrator() in workflow.py diverts to sync_execution_node
+    # instead of extractor, skipping the full extraction pipeline entirely.
+    #
+    # Safety: if the user's message is NOT a confirmation (they changed topic or
+    # uploaded a new PDF), clear the stale flag so it never accidentally fires.
+    if state.get("pending_sync_confirmation"):
+        raw_msg = (state.get("input_query") or "").lower().strip()
+        # Import here to avoid circular import at module load time.
+        from langgraph_agent.comparison_node import SYNC_CONFIRM_WORDS  # noqa: PLC0415
+        is_sync_confirm = any(word in raw_msg for word in SYNC_CONFIRM_WORDS)
+
+        if is_sync_confirm:
+            logger.info(
+                "Orchestrator: sync confirmation detected — routing to sync_execution_node."
+            )
+            # Clear the flag; sync_execution_node will handle the actual clear.
+            state["pending_sync_confirmation"] = False
+            state["routing_decision"] = "sync"
+            state["orchestrator_ran"] = True
+            return state
+        else:
+            # User changed topic or uploaded a new PDF — clear stale sync state.
+            logger.info(
+                "Orchestrator: pending_sync_confirmation was True but user message "
+                "is not a sync confirmation — clearing stale HITL flag."
+            )
+            state["pending_sync_confirmation"] = False
+            state["sync_summary"] = {}
+            state["staged_patient_fhir_id"] = ""
+            state["staged_session_id"] = ""
+
     query = state.get("input_query", "")
     prior_context = state.get("prior_query_context") or {}
 
@@ -589,16 +697,31 @@ def orchestrator_node(state: AgentState) -> AgentState:
 
         tool_plan = []
 
-        # Patient data — skip if already cached (and same patient, validated above)
-        if intent.get("needs_specific_patient"):
+        # ── PDF UPLOAD: 4-Phase Protocol enforcement ───────────────────────
+        # When a PDF is attached, the strict 4-phase protocol requires the full
+        # Phase 1 + Phase 2 tool suite to run unconditionally, regardless of
+        # what Haiku classified.  This overrides the per-intent checks below
+        # and guarantees patient safety (allergy/interaction) and payer compliance
+        # (denial risk) are never skipped because of a narrow Haiku classification.
+        pdf_attached = bool((state.get("pdf_source_file") or "").strip())
+        pdf_cache_hit = False  # will be set below if PDF bytes are unchanged
+
+        if pdf_attached:
+            logger.info(
+                "Orchestrator: PDF attached — enforcing full Phase 1+2 tool plan."
+            )
+
+            # Phase 1a: patient_lookup + med_retrieval (EHR baseline).
+            # Skip patient_lookup if cache is populated (same-patient guard already ran).
             if not state.get("extracted_patient"):
                 tool_plan.append("patient_lookup")
                 tool_plan.append("med_retrieval")
             else:
-                logger.info("Orchestrator: patient cache hit — skipping patient_lookup + med_retrieval")
+                logger.info(
+                    "Orchestrator (PDF): patient cache hit — skipping patient_lookup+med_retrieval."
+                )
 
-        # PDF evidence — skip only if hash matches current document bytes
-        if intent.get("needs_document_evidence") and state.get("pdf_source_file"):
+            # Phase 1b: pdf_extractor — skip only on exact content hash match.
             pdf_path = state["pdf_source_file"]
             cached_hash = state.get("extracted_pdf_hash", "")
             if cached_hash and state.get("extracted_pdf_pages"):
@@ -606,32 +729,84 @@ def orchestrator_node(state: AgentState) -> AgentState:
                     import hashlib
                     current_hash = hashlib.md5(open(pdf_path, "rb").read()).hexdigest()
                     if current_hash == cached_hash:
-                        logger.info("Orchestrator: PDF cache hit — skipping pdf_extractor")
+                        logger.info("Orchestrator (PDF): PDF cache hit — skipping pdf_extractor.")
+                        pdf_cache_hit = True
                     else:
-                        logger.info("Orchestrator: PDF hash mismatch — adding pdf_extractor")
+                        logger.info("Orchestrator (PDF): PDF hash mismatch — adding pdf_extractor.")
                         tool_plan.append("pdf_extractor")
                 except Exception:
                     tool_plan.append("pdf_extractor")
             else:
                 tool_plan.append("pdf_extractor")
 
-        # Policy check — skip if this payer is already cached
-        if intent.get("needs_policy_check"):
+            # Phase 2: policy_search — skip only if this payer is already cached.
             payer_id = state.get("payer_id", "")
             if payer_id and payer_id in (state.get("payer_policy_cache") or {}):
-                logger.info("Orchestrator: policy cache hit for payer %s — skipping policy_search", payer_id)
+                logger.info(
+                    "Orchestrator (PDF): policy cache hit for payer %s — skipping policy_search.",
+                    payer_id,
+                )
             else:
                 tool_plan.append("policy_search")
 
-        # Denial analysis — only useful when audit_results exist; skip if cached
-        if intent.get("needs_denial_analysis") and state.get("audit_results"):
+            # Phase 2: denial_analyzer — always run for PDF uploads.
+            # The denial_analyzer surfaces MISSING documentation gaps (ECOG, labs)
+            # that cause RCM rejections and MUST appear in the reconciliation summary.
             payer_id = state.get("payer_id", "")
             cpt = state.get("procedure_code", "")
             cache_key = f"{payer_id}:{cpt}"
             if cache_key in (state.get("denial_risk_cache") or {}):
-                logger.info("Orchestrator: denial risk cache hit — skipping denial_analyzer")
+                logger.info(
+                    "Orchestrator (PDF): denial risk cache hit — skipping denial_analyzer."
+                )
             else:
                 tool_plan.append("denial_analyzer")
+
+        else:
+            # ── Non-PDF path: standard per-intent tool selection ──────────────
+            # Patient data — skip if already cached (and same patient, validated above)
+            if intent.get("needs_specific_patient"):
+                if not state.get("extracted_patient"):
+                    tool_plan.append("patient_lookup")
+                    tool_plan.append("med_retrieval")
+                else:
+                    logger.info("Orchestrator: patient cache hit — skipping patient_lookup + med_retrieval")
+
+            # PDF evidence — skip only if hash matches current document bytes
+            if intent.get("needs_document_evidence") and state.get("pdf_source_file"):
+                pdf_path = state["pdf_source_file"]
+                cached_hash = state.get("extracted_pdf_hash", "")
+                if cached_hash and state.get("extracted_pdf_pages"):
+                    try:
+                        import hashlib
+                        current_hash = hashlib.md5(open(pdf_path, "rb").read()).hexdigest()
+                        if current_hash == cached_hash:
+                            logger.info("Orchestrator: PDF cache hit — skipping pdf_extractor")
+                        else:
+                            logger.info("Orchestrator: PDF hash mismatch — adding pdf_extractor")
+                            tool_plan.append("pdf_extractor")
+                    except Exception:
+                        tool_plan.append("pdf_extractor")
+                else:
+                    tool_plan.append("pdf_extractor")
+
+            # Policy check — skip if this payer is already cached
+            if intent.get("needs_policy_check"):
+                payer_id = state.get("payer_id", "")
+                if payer_id and payer_id in (state.get("payer_policy_cache") or {}):
+                    logger.info("Orchestrator: policy cache hit for payer %s — skipping policy_search", payer_id)
+                else:
+                    tool_plan.append("policy_search")
+
+            # Denial analysis — only useful when audit_results exist; skip if cached
+            if intent.get("needs_denial_analysis") and state.get("audit_results"):
+                payer_id = state.get("payer_id", "")
+                cpt = state.get("procedure_code", "")
+                cache_key = f"{payer_id}:{cpt}"
+                if cache_key in (state.get("denial_risk_cache") or {}):
+                    logger.info("Orchestrator: denial risk cache hit — skipping denial_analyzer")
+                else:
+                    tool_plan.append("denial_analyzer")
 
         # Reset source_unavailable — this query has an available source.
         state["source_unavailable"] = False

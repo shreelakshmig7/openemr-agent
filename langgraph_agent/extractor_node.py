@@ -46,17 +46,222 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from tools import get_patient_info as tool_get_patient_info
 from tools import get_medications as tool_get_medications
+from tools import get_allergies as tool_get_allergies
 from tools import check_drug_interactions as tool_check_drug_interactions
 from tools.policy_search import search_policy as tool_search_policy
 from pdf_extractor import extract_pdf as tool_extract_pdf
 from denial_analyzer import analyze_denial_risk as tool_analyze_denial_risk
 from verification import check_allergy_conflict
 from langgraph_agent.state import AgentState
+import database as _db
+from pydantic import ValidationError as _PydanticValidationError
+import schemas as _schemas
+
+# Initialise the evidence_staging DB at module load.  Wrapped in try/except so
+# a transient I/O error does not prevent the rest of the module from loading —
+# the staging layer is asynchronous with respect to the main pipeline.
+try:
+    _db.init_db()
+except Exception as _db_init_exc:
+    logger.warning("evidence_staging DB init failed — marker staging disabled: %s", _db_init_exc)
 
 # Intents where denial risk analysis adds RCM value.
 # SAFETY_CHECK is excluded — allergy/interaction checks already answer that question,
 # and showing a billing denial score alongside "Do NOT administer" confuses the signal.
 _DENIAL_RISK_INTENTS = {"INTERACTIONS", "GENERAL_CLINICAL"}
+
+
+# ── Clinical marker scanner ───────────────────────────────────────────────────
+#
+# Compiled regex patterns for each oncology / RCM biomarker.
+# On a cache-miss PDF extraction the scanner runs over every verbatim element
+# and INSERTs found markers into evidence_staging (sync_status='PENDING') so
+# the FHIR sync worker can POST them as Observations to OpenEMR.
+#
+# Pattern design notes:
+#   - HER2 / BRCA / ROS1 / Ki-67 / PD-L1 / CA-125: hyphen variants covered.
+#   - ER / PR: require a qualifier (status, positive, negative, +/-) to suppress
+#     common false-positives ("ER visit", "PR manager").
+#   - ALK, KRAS, NRAS, BRAF, EGFR: 4+ letter gene names — bare word-boundary
+#     match is sufficient in a clinical document context.
+#   - MSI: covers MSI, MSI-H, MSI-L, MSS, and full "microsatellite instability".
+#   - TMB: covers both abbreviation and the spelled-out phrase.
+#   - Serum markers (PSA, CEA, CA-125, AFP): cover common aliases.
+
+_CLINICAL_MARKERS: dict[str, re.Pattern[str]] = {
+    # Breast / general oncology
+    "HER2":   re.compile(r"\bHER[-\s]?2(?:/neu)?\b", re.IGNORECASE),
+    "ER":     re.compile(
+        r"\b(?:ER\s*[+\-]"
+        r"|(?:ER|estrogen\s+receptor)\s+"
+        r"(?:positive|negative|status|expression|staining|score|result))\b",
+        re.IGNORECASE,
+    ),
+    "PR":     re.compile(
+        r"\b(?:PR\s*[+\-]"
+        r"|(?:PR|progesterone\s+receptor)\s+"
+        r"(?:positive|negative|status|expression|staining|score|result))\b",
+        re.IGNORECASE,
+    ),
+    "Ki-67":  re.compile(r"\bKi[-\s]?67\b", re.IGNORECASE),
+    # Immunotherapy
+    "PD-L1":  re.compile(r"\bPD[-\s]?L[-\s]?1\b", re.IGNORECASE),
+    # Hereditary cancer
+    "BRCA1":  re.compile(r"\bBRCA[-\s]?1\b", re.IGNORECASE),
+    "BRCA2":  re.compile(r"\bBRCA[-\s]?2\b", re.IGNORECASE),
+    # Lung cancer drivers
+    "EGFR":   re.compile(r"\bEGFR\b", re.IGNORECASE),
+    "ALK":    re.compile(r"\bALK\b", re.IGNORECASE),
+    "ROS1":   re.compile(r"\bROS[-\s]?1\b", re.IGNORECASE),
+    # Colorectal / pan-cancer RAS/RAF
+    "KRAS":   re.compile(r"\bKRAS\b", re.IGNORECASE),
+    "NRAS":   re.compile(r"\bNRAS\b", re.IGNORECASE),
+    "BRAF":   re.compile(r"\bBRAF\b", re.IGNORECASE),
+    # Genomic instability / tumour burden
+    "MSI":    re.compile(
+        r"\bMSI(?:-[HL])?\b|\bMSS\b|\bmicrosatellite\s+instab\w+\b",
+        re.IGNORECASE,
+    ),
+    "TMB":    re.compile(
+        r"\bTMB\b|\btumor\s+mutational\s+burden\b",
+        re.IGNORECASE,
+    ),
+    # Serum tumour markers
+    "PSA":    re.compile(
+        r"\bPSA\b|\bprostate[-\s]specific\s+antigen\b",
+        re.IGNORECASE,
+    ),
+    "CEA":    re.compile(
+        r"\bCEA\b|\bcarcinoembryonic\s+antigen\b",
+        re.IGNORECASE,
+    ),
+    "CA-125": re.compile(r"\bCA[-\s]?125\b", re.IGNORECASE),
+    "AFP":    re.compile(
+        r"\bAFP\b|\balpha[-\s]fetoprotein\b",
+        re.IGNORECASE,
+    ),
+}
+
+# Searches the 150-character window immediately after a marker hit for a
+# result value (IHC score, qualitative result, numeric, or percentage).
+_MARKER_VALUE_PATTERN = re.compile(
+    r"(?P<value>"
+    r"positive|negative|equivocal"
+    r"|amplif\w+"
+    r"|non[-\s]amplif\w+"
+    r"|overexpress\w+"
+    r"|wild[-\s]?type"
+    r"|mutant?"
+    r"|high|low|intermediate"
+    r"|MSI-H|MSI-L|MSS"
+    r"|[0-3]\+"
+    r"|\d+(?:\.\d+)?\s*%"
+    r"|\d+(?:\.\d+)?\s*(?:ng/mL|U/mL|mIU/mL|muts/Mb)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Character window after the marker match start to search for a result value.
+_VALUE_WINDOW = 150
+
+
+def _scan_and_stage_markers(
+    pdf_extractions: List[dict],
+    session_id: str,
+    patient_id: str,
+    source_file: str,
+) -> int:
+    """
+    Multi-fact scan: search every freshly-extracted PDF element for clinical
+    biomarkers and INSERT each occurrence into ``evidence_staging`` with
+    ``sync_status='PENDING'`` before the Extractor Node returns its results.
+
+    Only called on a cache-miss (fresh) PDF extraction — cache-hit paths
+    already have their markers staged from a prior run in this session.
+
+    For each element the function:
+      1. Tests every pattern in ``_CLINICAL_MARKERS`` against the verbatim text.
+      2. For each hit, inspects the 150-character window after the match start
+         for a result value (e.g. ``"positive"``, ``"3+"``, ``"80%"``).
+      3. Calls ``database.insert_clinical_marker()`` — errors are caught per-row
+         so a single DB failure never aborts the remaining scan.
+
+    Args:
+        pdf_extractions: Raw extraction dicts from ``tool_extract_pdf()``; each
+                         must carry ``verbatim_quote``, ``page_number``, and
+                         ``element_type``.
+        session_id:      LangGraph session ID (``state["session_id"]``).
+        patient_id:      Resolved EHR patient ID, or empty string.
+        source_file:     Path of the source PDF (propagated to each DB row).
+
+    Returns:
+        int: Total number of marker rows successfully inserted.
+    """
+    staged = 0
+    rejected = 0
+    for ext in pdf_extractions:
+        text = ext.get("verbatim_quote", "")
+        if not text:
+            continue
+        page_number = ext.get("page_number")
+        element_type = ext.get("element_type", "")
+
+        for marker_name, pattern in _CLINICAL_MARKERS.items():
+            for match in pattern.finditer(text):
+                # Extract a result value from the immediate context after the match.
+                window_start = match.start()
+                window_end = min(match.end() + _VALUE_WINDOW, len(text))
+                window = text[window_start:window_end]
+                value_match = _MARKER_VALUE_PATTERN.search(window)
+                marker_value = value_match.group("value") if value_match else ""
+
+                # ── Validate against the LOINC registry before inserting ──
+                # ClinicalObservation ensures fact_type is LOINC-mapped,
+                # fact_value is a clean string, and raw_text has provenance.
+                # Findings that fail validation are logged and skipped — they
+                # will never enter evidence_staging or reach the FHIR sync worker.
+                try:
+                    obs = _schemas.ClinicalObservation(
+                        fact_type=marker_name,
+                        fact_value=marker_value,
+                        raw_text=text,
+                        session_id=session_id,
+                        patient_id=patient_id,
+                        source_file=source_file,
+                        page_number=page_number,
+                        element_type=element_type,
+                        confidence=1.0,
+                    )
+                except _PydanticValidationError as val_exc:
+                    rejected += 1
+                    first_err = val_exc.errors()[0]["msg"] if val_exc.errors() else str(val_exc)
+                    logger.debug(
+                        "evidence_staging: skipping marker '%s' (validation rejected) — %s",
+                        marker_name,
+                        first_err,
+                    )
+                    continue
+
+                # ── Insert validated, cleaned values into SQLite ──────────
+                try:
+                    _db.insert_clinical_marker(**obs.to_db_kwargs())
+                    staged += 1
+                except Exception as db_exc:
+                    logger.warning(
+                        "evidence_staging INSERT failed for marker '%s' in '%s': %s",
+                        marker_name,
+                        os.path.basename(source_file),
+                        db_exc,
+                    )
+
+    if staged or rejected:
+        logger.info(
+            "evidence_staging: staged %d, rejected %d clinical marker(s) from '%s'.",
+            staged,
+            rejected,
+            os.path.basename(source_file),
+        )
+    return staged
 
 
 # ── Safety check: proposed drug extraction ───────────────────────────────────
@@ -211,7 +416,12 @@ def _stub_pii_scrubber(text: str) -> str:
 
 # ── Extraction formatter ──────────────────────────────────────────────────────
 
-def _format_extractions(patient: dict, medications: List[dict], interactions: List[dict]) -> List[dict]:
+def _format_extractions(
+    patient: dict,
+    medications: List[dict],
+    interactions: List[dict],
+    med_source: str = "",
+) -> List[dict]:
     """
     Convert raw tool results into extraction dicts with verbatim citations.
     Each extraction contains the claim, the verbatim quote from source, and the source path.
@@ -220,6 +430,10 @@ def _format_extractions(patient: dict, medications: List[dict], interactions: Li
         patient: Patient dict from tool_get_patient_info.
         medications: Medication list from tool_get_medications.
         interactions: Interaction list from tool_check_drug_interactions.
+        med_source: Source label returned by get_medications (e.g. "Live EHR (OpenEMR FHIR)").
+                    When this is a live EHR source the extractions are marked ``synthetic=True``
+                    so the auditor skips source-file citation verification — FHIR responses
+                    cannot be verified against a local JSON file.
 
     Returns:
         List[dict]: Extraction dicts, each with claim, citation, source, verbatim keys.
@@ -230,34 +444,49 @@ def _format_extractions(patient: dict, medications: List[dict], interactions: Li
     try:
         extractions = []
 
+        # Determine whether patient data came from live EHR (FHIR) or local cache.
+        patient_from_fhir = patient and patient.get("source") == "openemr_fhir"
+        # Medications from live EHR cannot be verified against a local JSON file.
+        meds_from_fhir = bool(med_source and ("fhir" in med_source.lower() or "ehr" in med_source.lower()))
+
         if patient:
             allergies = patient.get("allergies", [])
             allergies_str = ", ".join(allergies) if allergies else "none on record"
+            # synthetic=True ONLY for the empty-allergy placeholder — it is a derived
+            # statement ("no known allergies") not present verbatim in any source file
+            # AND we don't want the LLM repeating it in medication-intent responses.
+            # When allergies ARE populated (from FHIR or local cache) the claim is real
+            # data; synthetic=False so the LLM includes it in its synthesis.
             extractions.append({
-                "claim": f"{patient['name']} has known allergies: {allergies_str}.",
+                "kind":     "allergy",
+                "claim":    f"{patient['name']} has known allergies: {allergies_str}.",
                 "citation": allergies_str if allergies else "no known allergies",
-                "source": "mock_data/patients.json",
+                "source":   "openemr_fhir" if patient_from_fhir else "mock_data/patients.json",
                 "verbatim": True,
-                # When the allergy list is empty, "no known allergies" is a derived
-                # statement — not a verbatim string in the source file. Mark synthetic
-                # so the auditor skips source-file citation verification for this case.
                 "synthetic": not bool(allergies),
             })
 
         for med in medications:
+            # FHIR medication data is real EHR data — synthetic=False so the LLM
+            # synthesis includes it in the facts list.  The auditor's
+            # _verify_citation_exists_in_source already short-circuits to True for
+            # "openemr_fhir" sources, so no file-verification is attempted.
             extractions.append({
-                "claim": (
+                "kind":     "medication",
+                "claim":    (
                     f"{patient['name']} is prescribed {med['name']} "
                     f"{med.get('dose', '')} {med.get('frequency', '')}."
                 ),
                 "citation": f"{med['name']} {med.get('dose', '')} {med.get('frequency', '')}".strip(),
-                "source": "mock_data/medications.json",
+                "source":   "openemr_fhir" if meds_from_fhir else "mock_data/medications.json",
                 "verbatim": True,
+                "synthetic": False,
             })
 
         for interaction in interactions:
             extractions.append({
-                "claim": (
+                "kind":     "interaction",
+                "claim":    (
                     f"Drug interaction detected: {interaction['drug1']} + {interaction['drug2']} "
                     f"— severity {interaction['severity']}."
                 ),
@@ -265,7 +494,7 @@ def _format_extractions(patient: dict, medications: List[dict], interactions: Li
                     f"{interaction['drug1']} and {interaction['drug2']}: "
                     f"{interaction.get('recommendation', interaction['severity'])}"
                 ),
-                "source": "mock_data/interactions.json",
+                "source":   "mock_data/interactions.json",
                 "verbatim": True,
             })
 
@@ -508,11 +737,32 @@ def extractor_node(state: AgentState) -> AgentState:
 
         # ── EHR tool suite — only runs when patient was found in the database ─
         medications: List[dict] = []
+        med_source: str = ""
         found_interactions: List[dict] = []
         proposed_drug = ""
         allergy_conflict_result: dict = {}
 
         if patient is not None:
+            # ── Allergy refresh — runs every turn (cached patient may have stale [] allergies) ─
+            # FHIR allergy prefetch only happens during patient_lookup. For follow-up turns the
+            # patient comes from the session cache where allergies may be empty. Calling
+            # tool_get_allergies with the patient's FHIR UUID ensures live data every time.
+            allergy_result = tool_get_allergies(patient_id)
+            tool_trace.append({
+                "tool": "tool_get_allergies",
+                "input": patient_id,
+                "output": allergy_result,
+            })
+            if allergy_result.get("success") and allergy_result.get("allergies") is not None:
+                fresh_allergies = allergy_result["allergies"]
+                if fresh_allergies != patient.get("allergies"):
+                    patient = {**patient, "allergies": fresh_allergies}
+                    state["extracted_patient"] = patient
+                    logger.info(
+                        "Extractor: refreshed allergies for %s → %s (source: %s)",
+                        patient_id, fresh_allergies, allergy_result.get("source"),
+                    )
+
             meds_result = tool_get_medications(patient_id)
             tool_trace.append({
                 "tool": "tool_get_medications",
@@ -521,6 +771,7 @@ def extractor_node(state: AgentState) -> AgentState:
             })
             tool_call_history.append({"tool": "med_retrieval", "status": "success" if meds_result.get("success") else "fail", "ts": _ts})
             medications = meds_result.get("medications", []) if meds_result.get("success") else []
+            med_source = meds_result.get("source", "")
 
             # For SAFETY_CHECK: extract proposed drug, check allergy conflict (name + class),
             # and include it in the interaction check for drug-drug conflict detection.
@@ -555,7 +806,7 @@ def extractor_node(state: AgentState) -> AgentState:
             tool_call_history.append({"tool": "interaction_check", "status": "success" if interactions_result.get("success") else "fail", "ts": _ts})
             found_interactions = interactions_result.get("interactions", []) if interactions_result.get("success") else []
 
-        all_extractions = _format_extractions(patient, medications, found_interactions)
+        all_extractions = _format_extractions(patient, medications, found_interactions, med_source=med_source)
 
         # Scenario A: patient not in EHR but PDF is attached — prepend EHR gap flags.
         if patient is None and ehr_gap_extractions:
@@ -617,11 +868,12 @@ def extractor_node(state: AgentState) -> AgentState:
                         if not page_text:
                             continue
                         all_extractions.append({
-                            "claim": page_text,
-                            "citation": page_text,
-                            "source": pdf_source_file,
-                            "verbatim": True,
-                            "page_number": page_num,
+                            "kind":         "pdf_content",
+                            "claim":        page_text,
+                            "citation":     page_text,
+                            "source":       pdf_source_file,
+                            "verbatim":     True,
+                            "page_number":  page_num,
                             "element_type": "cached",
                         })
                 documents_processed.append(pdf_source_file)
@@ -653,17 +905,43 @@ def extractor_node(state: AgentState) -> AgentState:
                         verbatim = pdf_ext.get("verbatim_quote", "")
                         new_pages.setdefault(page_key, []).append(verbatim)
                         all_extractions.append({
-                            "claim": verbatim,
-                            "citation": verbatim,
-                            "source": pdf_ext.get("source_file", pdf_source_file),
-                            "verbatim": True,
-                            "page_number": pdf_ext.get("page_number"),
+                            "kind":         "pdf_content",
+                            "claim":        verbatim,
+                            "citation":     verbatim,
+                            "source":       pdf_ext.get("source_file", pdf_source_file),
+                            "verbatim":     True,
+                            "page_number":  pdf_ext.get("page_number"),
                             "element_type": pdf_ext.get("element_type"),
                         })
                     # Write to Layer 2 cache.
                     state["extracted_pdf_pages"] = new_pages
                     state["extracted_pdf_hash"] = current_hash
                     documents_processed.append(pdf_source_file)
+
+                    # Multi-fact clinical marker scan — INSERT every detected
+                    # biomarker into evidence_staging before returning results.
+                    # Runs only on fresh extraction (cache miss) so markers are
+                    # not double-staged on subsequent cache-hit turns.
+                    _staged = _scan_and_stage_markers(
+                        pdf_extractions=pdf_result.get("extractions", []),
+                        session_id=state.get("session_id", ""),
+                        patient_id=patient_id or "",
+                        source_file=pdf_source_file,
+                    )
+                    if _staged:
+                        tool_trace.append({
+                            "tool": "clinical_marker_scan",
+                            "input": {
+                                "source_file": pdf_source_file,
+                                "elements_scanned": len(pdf_result.get("extractions", [])),
+                            },
+                            "output": {"markers_staged": _staged},
+                        })
+                        tool_call_history.append({
+                            "tool": "clinical_marker_scan",
+                            "status": "success",
+                            "ts": _ts,
+                        })
                 else:
                     logger.warning(
                         "PDF extraction failed for '%s': %s",

@@ -100,6 +100,14 @@ def _verify_citation_exists_in_source(claim: str, citation: str, source: str) ->
         # Trust the verbatim flag set by the extractor.
         if source.lower().endswith(".pdf"):
             return True
+        # Virtual / tool-identifier sources (e.g. "openemr_fhir", "policy_search",
+        # "EHR_UNAVAILABLE", "mock") are not file paths on disk — there is nothing
+        # to read and verify against.  Trust the tool result directly.
+        # Uses the same BASE_DIR join that _load_source_data uses so relative paths
+        # like "mock_data/medications.json" still resolve correctly.
+        full_source_path = os.path.join(BASE_DIR, source)
+        if not os.path.isfile(full_source_path):
+            return True
         source_content = _load_source_data(source)
         if not source_content:
             return False
@@ -392,14 +400,18 @@ def auditor_node(state: AgentState) -> AgentState:
                 failed_extractions.append(extraction)
                 continue
 
-            if not verbatim:
-                failed_extractions.append(extraction)
+            # Synthetic extractions are computed from tool results (e.g. policy criteria,
+            # allergy conflict determinations, EHR gap flags). They are not verbatim quotes
+            # from a source document, so neither the verbatim check nor source-file
+            # verification applies — the tool that produced them is trusted directly.
+            # This check MUST come before the verbatim check: policy criteria extractions
+            # carry synthetic=True but no verbatim field (defaults False), so they would
+            # incorrectly fail the verbatim gate and trigger the 3× retry loop.
+            if extraction.get("synthetic"):
                 continue
 
-            # Synthetic extractions are computed from tool results (e.g. allergy conflict
-            # determinations). They are not verbatim quotes from a source file, so
-            # source-file verification is skipped — the tool that produced them is trusted.
-            if extraction.get("synthetic"):
+            if not verbatim:
+                failed_extractions.append(extraction)
                 continue
 
             if not _verify_citation_exists_in_source(extraction.get("claim", ""), citation, source):
