@@ -168,3 +168,116 @@ class TestAuditorAmbiguity:
         question = result.get("clarification_needed", "").lower()
         for field in ["ssn", "mrn"]:
             assert field not in question, f"PII field '{field}' found in clarification question"
+
+
+# ── Tests: virtual-source short-circuit (os.path.isfile guard) ───────────────
+#
+# After the auditor fix, any source string that is not a real file on disk
+# (e.g. "openemr_fhir", "policy_search", "EHR_UNAVAILABLE") must pass citation
+# verification immediately — there is no local file to compare against, so the
+# tool result is trusted directly.  This prevents the 3× retry loop that was
+# triggered by policy criteria extractions and FHIR EHR extractions.
+
+FHIR_EXTRACTION = {
+    "claim": "John Smith has known allergies: Penicillin, Sulfa.",
+    "citation": "Penicillin, Sulfa",
+    "source": "openemr_fhir",
+    "verbatim": True,
+}
+
+POLICY_EXTRACTION = {
+    "claim": "[Cigna Medical Policy #012] Criteria A MET: Conservative therapy failure.",
+    "citation": "Criteria A: Conservative therapy failure",
+    "source": "policy_search",
+    "verbatim": True,
+}
+
+EHR_UNAVAILABLE_EXTRACTION = {
+    "claim": "Allergy status could not be verified — no EHR record found for this patient.",
+    "citation": "EHR_UNAVAILABLE",
+    "source": "EHR_UNAVAILABLE",
+    "verbatim": True,
+    "synthetic": True,
+}
+
+PDF_CONTENT_EXTRACTION = {
+    "claim": "Section 3: Patient has documented Penicillin anaphylaxis.",
+    "citation": "Section 3: Patient has documented Penicillin anaphylaxis.",
+    "source": "/tmp/mock_data/test_chart.pdf",
+    "verbatim": True,
+    "kind": "pdf_content",
+}
+
+
+class TestAuditorVirtualSourceShortCircuit:
+    """
+    Validates that virtual source strings (not real file paths) short-circuit
+    _verify_citation_exists_in_source to True so the auditor does not attempt
+    to open them as files and fail — which was causing the 3× retry loop.
+    """
+
+    def test_fhir_source_passes_without_file_verification(self):
+        """openemr_fhir is not a real file — auditor must pass it immediately (routing=pass)."""
+        state = make_state([FHIR_EXTRACTION])
+        result = auditor_node(state)
+        assert result["routing_decision"] == "pass", (
+            "FHIR extraction should pass auditor without file-verification retry loop"
+        )
+
+    def test_policy_search_source_passes_without_retry_loop(self):
+        """
+        Policy criteria extractions have synthetic=True but no verbatim field.
+        Before the fix, the verbatim check (False by default) fired BEFORE the
+        synthetic check, adding all criteria to failed_extractions and triggering
+        the 3× retry loop (25 tool calls).  After the fix, synthetic is checked
+        first so criteria pass immediately.
+        """
+        state = make_state([POLICY_EXTRACTION])
+        result = auditor_node(state)
+        assert result["routing_decision"] == "pass", (
+            "Policy criteria extraction should pass auditor in one shot — "
+            "was previously causing 25-step retry loop (3 extractor reruns)"
+        )
+
+    def test_synthetic_check_fires_before_verbatim_check(self):
+        """
+        Regression test: synthetic=True with verbatim absent/False must PASS,
+        not fail.  If the verbatim gate fired first this would be 'missing'.
+        """
+        synthetic_no_verbatim = {
+            "claim": "[Cigna Medical Policy #012] Criteria A MET: Conservative therapy failure.",
+            "citation": "policy_search:cigna",
+            "source": "policy_search",
+            "synthetic": True,
+            # verbatim intentionally absent — mirrors real policy criteria extractions
+        }
+        state = make_state([synthetic_no_verbatim])
+        result = auditor_node(state)
+        assert result["routing_decision"] == "pass", (
+            "synthetic=True must short-circuit before the verbatim check fires"
+        )
+        assert result["iteration_count"] == 0, "No retry loop should have occurred"
+
+    def test_ehr_unavailable_source_passes(self):
+        """EHR_UNAVAILABLE synthetic extractions must pass auditor (synthetic=True skips verify)."""
+        state = make_state([EHR_UNAVAILABLE_EXTRACTION])
+        result = auditor_node(state)
+        # synthetic=True takes the early-continue path in the auditor loop.
+        assert result["routing_decision"] == "pass"
+
+    def test_pdf_content_extraction_passes_via_pdf_guard(self):
+        """PDF extractions (.pdf suffix) pass via the existing PDF guard — unchanged behaviour."""
+        state = make_state([PDF_CONTENT_EXTRACTION])
+        result = auditor_node(state)
+        assert result["routing_decision"] == "pass", (
+            "PDF content extractions must pass auditor via the .pdf suffix guard"
+        )
+
+    def test_mixed_fhir_and_policy_extractions_pass_in_one_shot(self):
+        """All virtual-source extractions in a single state must pass without retry."""
+        state = make_state([FHIR_EXTRACTION, POLICY_EXTRACTION], iteration_count=0)
+        result = auditor_node(state)
+        assert result["routing_decision"] == "pass"
+        assert result["iteration_count"] == 0, (
+            "iteration_count must stay 0 — no retry loop should fire"
+        )

@@ -1,8 +1,8 @@
 # golden_data.yaml
 # AgentForge — Healthcare RCM AI Agent — Eval Dataset
 # Gauntlet YAML format
-# 57 test cases: 10 happy_path, 16 edge_case, 7 adversarial, 17 pdf_clinical (PR 3),
-#   5 policy_extraction (gs-053 to gs-057)
+# 59 test cases: 10 happy_path, 16 edge_case, 7 adversarial, 17 pdf_clinical (PR 3),
+#   5 policy_extraction (gs-053 to gs-057), 2 auditor_fix (gs-058 to gs-059)
 # PR 1 additions (gs-019 to gs-026): pdf_extractor, denial_analyzer, drug-class allergy,
 #   EHR confidence penalty (Scenario A), Scenario B hard stop.
 # PR 2 additions (gs-027 to gs-033): non-existent patient ID/MRN rejection,
@@ -19,6 +19,14 @@
 #   imaging-procedure classification fix (MRI not blocked by PDF gate),
 #   patient-not-in-EHR + PDF policy query (Scenario A variant),
 #   no-payer-mentioned graceful fallback, procedure-as-description extraction.
+# PR 5 additions (gs-058 to gs-059):
+#   Auditor virtual-source short-circuit fix (os.path.isfile guard).
+#   Policy criteria extractions with source="policy_search" and FHIR extractions
+#   with source="openemr_fhir" no longer trigger the 3× retry loop — auditor
+#   short-circuits to pass for any source string that is not a real file on disk.
+#   PDF content filter fix — extractions tagged kind="pdf_content" now flow through
+#   all intent filters (ALLERGIES, MEDICATIONS, etc.) so attached chart content
+#   reaches the synthesis LLM for "in the chart" / PDF-referenced queries.
 # New optional fields:
 #   pdf_source_file        — PDF path passed to run_workflow (reproducible: mock_data/ only)
 #   expected_confidence_max — pass if confidence_score <= this value
@@ -1074,12 +1082,17 @@ test_cases:
     category: "pdf_clinical"
     description: >
       Allergy contraindication for surgical prophylaxis: agent must identify
-      Penicillin anaphylaxis from John Smith's EHR and validate that the
-      clinical note specifies Clindamycin 600mg IV as the safe alternative.
+      Penicillin allergy from John Smith's record (mock_data fallback when FHIR
+      AllergyIntolerance returns empty) and validate that the clinical note
+      specifies Clindamycin 600mg IV as the safe alternative.
+      PDF content (kind="pdf_content") now flows through the ALLERGIES intent
+      filter so chart-documented prophylaxis recommendations reach the LLM.
+      Must NOT trigger the retry loop ("partial results").
     query: "Review John Smith's allergies for surgical prophylaxis."
     pdf_source_file: "mock_data/AgentForge_Test_ClinicalNote.pdf"
     expected_tools:
       - tool_get_patient_info
+      - tool_get_allergies
       - tool_extract_pdf
     must_contain:
       - "penicillin"
@@ -1087,6 +1100,8 @@ test_cases:
     must_not_contain:
       - "no allergy"
       - "safe to use penicillin"
+      - "partial results"
+      - "maximum review attempts"
       - "traceback"
     difficulty: "pdf_clinical"
 
@@ -1254,6 +1269,8 @@ test_cases:
       Orchestrator must use Haiku to extract "cigna" from the query and write it
       to state["payer_id"] so policy_search can run.  Result must include Cigna
       policy criteria — not a no-policy-found message.
+      Policy criteria extractions now use source="policy_search" which passes
+      the auditor's os.path.isfile guard — response must NOT be "partial results".
     query: "Does John Smith meet Cigna's criteria for knee replacement?"
     pdf_source_file: "mock_data/AgentForge_Test_ClinicalNote.pdf"
     # payer_id intentionally omitted — extraction from query text is what we test
@@ -1266,6 +1283,8 @@ test_cases:
     must_not_contain:
       - "no policy found"
       - "not available"
+      - "partial results"
+      - "maximum review attempts"
       - "error"
       - "traceback"
     difficulty: "policy_extraction"
@@ -1349,6 +1368,7 @@ test_cases:
       "Total knee arthroplasty" should be accepted as procedure_identifier and
       passed to policy_search.  The tool must not crash on a non-numeric procedure
       string; Cigna criteria must still be retrieved and evaluated.
+      Policy criteria extractions pass the auditor in one shot (no retry loop).
     query: "Does John Smith meet Cigna's criteria for total knee arthroplasty?"
     pdf_source_file: "mock_data/AgentForge_Test_ClinicalNote.pdf"
     payer_id: "cigna"
@@ -1361,6 +1381,71 @@ test_cases:
       - "criteria"
     must_not_contain:
       - "invalid procedure"
+      - "partial results"
+      - "maximum review attempts"
       - "error"
       - "traceback"
     difficulty: "policy_extraction"
+
+  # ── PR 5: Auditor virtual-source short-circuit (os.path.isfile guard) ────────
+
+  - id: "gs-058"
+    category: "auditor_fix"
+    description: >
+      Regression guard for the auditor retry-loop bug.
+      Policy criteria extractions use source="policy_search" which is not a real
+      file on disk.  Before the fix, the auditor tried to open "policy_search" as
+      a file, failed, and re-ran the extractor up to 3 times (25 tool calls total).
+      After the os.path.isfile guard, the auditor short-circuits to pass immediately.
+      Response must show policy criteria results and must NOT be "partial results".
+      Confidence must be full (≥ 0.85), not the 0.5 ceiling-hit score.
+    query: "Verify if John Smith meets Cigna Medical Policy #012 for CPT 27447."
+    pdf_source_file: "mock_data/AgentForge_Test_ClinicalNote.pdf"
+    payer_id: "cigna"
+    procedure_code: "27447"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_allergies
+      - tool_get_medications
+      - tool_extract_pdf
+      - tool_search_policy
+      - tool_analyze_denial_risk
+    must_contain:
+      - "Cigna"
+      - "criteria"
+      - "27447"
+    must_not_contain:
+      - "partial results"
+      - "maximum review attempts"
+      - "insufficient documentation"
+      - "traceback"
+      - "crash"
+    difficulty: "auditor_fix"
+
+  - id: "gs-059"
+    category: "auditor_fix"
+    description: >
+      Regression guard for the PDF content filter fix.
+      Before the fix, ALLERGIES intent queries filtered extractions to
+      kind="allergy" only — PDF extractions had no kind field and returned
+      "unknown", which was excluded.  The LLM saw empty facts and returned
+      a refusal ("no allergy records accessed").
+      After the fix, PDF extractions are tagged kind="pdf_content" at creation
+      time and included in the ALLERGIES filter so chart-documented allergy
+      information reaches the synthesis LLM.
+      Query uses "in this chart" phrasing to explicitly trigger PDF content lookup.
+    query: "In this chart, what allergies should be considered for John Smith's surgical prep?"
+    pdf_source_file: "mock_data/AgentForge_Test_ClinicalNote.pdf"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_allergies
+      - tool_extract_pdf
+    must_contain:
+      - "penicillin"
+    must_not_contain:
+      - "no allergy records"
+      - "did not have access to allergy"
+      - "partial results"
+      - "maximum review attempts"
+      - "traceback"
+    difficulty: "auditor_fix"
