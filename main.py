@@ -29,6 +29,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, Query, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
@@ -59,6 +60,19 @@ app = FastAPI(
     title=SERVICE_NAME,
     version=VERSION,
     description="Healthcare RCM AI agent for medication safety review.",
+)
+
+# Allow the OpenEMR UI (served on 8300/9300) to call this API from the browser.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8300",
+        "https://localhost:9300",
+        "http://127.0.0.1:8300",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
