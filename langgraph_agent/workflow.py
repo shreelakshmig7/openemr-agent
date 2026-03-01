@@ -3,18 +3,18 @@ workflow.py
 -----------
 AgentForge — Healthcare RCM AI Agent — LangGraph workflow assembler
 --------------------------------------------------------------------
-Assembles the full LangGraph state machine from six nodes and exposes
-run_workflow() as the single entry point for main.py.
+Assembles the full LangGraph state machine and exposes run_workflow()
+as the single entry point for main.py.
 
-Graph topology:
+Graph topology (Human-in-the-Loop HITL sync):
     START → router → (OUT_OF_SCOPE → output → END; else → orchestrator)
+    orchestrator → (if pending_sync_confirmation confirmed → sync_execution → output → END)
     orchestrator → extractor
     extractor → (if pending_user_input → clarification → END; else → auditor)
-    auditor:
-        "pass"                  → output → END
-        "missing" (count < 3)   → extractor (review loop)
-        "ambiguous"             → clarification → extractor (after user responds)
-        "partial" (count >= 3)  → output → END
+    auditor → output (always — synthesises clinical response first)
+    output  → comparison (PDF path: appends sync prompt to synthesised response → END)
+            → END        (non-PDF path)
+    comparison → END  (sync prompt already appended; never loops back to output)
 
 Memory System:
     Layer 1 (Conversation History): messages field with add_messages reducer.
@@ -51,6 +51,8 @@ from langgraph_agent.orchestrator_node import orchestrator_node
 from langgraph_agent.extractor_node import extractor_node
 from langgraph_agent.auditor_node import auditor_node, _synthesize_response, _build_citations_part
 from langgraph_agent.clarification_node import clarification_node, resume_from_clarification
+from langgraph_agent.comparison_node import comparison_node
+from langgraph_agent.sync_execution_node import sync_execution_node
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 
 # ── SQLite checkpointer (Layer 3 — Persistent Memory) ─────────────────────────
@@ -104,18 +106,44 @@ def _filter_extractions_by_intent(extractions: list, query_intent: str) -> list:
         if not extractions or not query_intent:
             return extractions
 
+        def _kind(e: dict) -> str:
+            """Return semantic kind tag; fall back to source-string heuristic."""
+            k = e.get("kind", "")
+            if k:
+                return k
+            src = e.get("source", "").lower()
+            # PDF sources always get their own kind so they survive every filter.
+            if src.endswith(".pdf"):
+                return "pdf_content"
+            if "interaction" in src:
+                return "interaction"
+            if "medication" in src:
+                return "medication"
+            if "patient" in src or "allerg" in src:
+                return "allergy"
+            if "openemr_fhir" in src or "ehr" in src:
+                # FHIR extractions — use claim text to disambiguate
+                claim = e.get("claim", "").lower()
+                if "prescribed" in claim or "is on" in claim or "taking" in claim:
+                    return "medication"
+                if "allerg" in claim:
+                    return "allergy"
+            return "unknown"
+
         if query_intent == "MEDICATIONS":
-            return [e for e in extractions if "medications" in e.get("source", "").lower()]
+            # Include medications, interactions, AND any PDF content (the PDF may
+            # list medications or contraindications relevant to the question).
+            return [e for e in extractions if _kind(e) in ("medication", "interaction", "pdf_content")]
 
         if query_intent == "ALLERGIES":
-            return [e for e in extractions if "patients" in e.get("source", "").lower()]
+            # Always include PDF content — the allergy answer may be in the attached note.
+            return [e for e in extractions if _kind(e) in ("allergy", "pdf_content")]
 
         if query_intent == "INTERACTIONS":
-            return [e for e in extractions if "interactions" in e.get("source", "").lower()]
+            return [e for e in extractions if _kind(e) in ("interaction", "medication", "pdf_content")]
 
         if query_intent == "SAFETY_CHECK":
-            # Include all three sources — allergy, meds, and interactions —
-            # so the Output Node has full context to build a clinical verdict.
+            # Include everything — allergy, meds, interactions, and PDF evidence.
             return list(extractions)
 
         # GENERAL_CLINICAL or OUT_OF_SCOPE (refusal already set) — return all
@@ -263,6 +291,12 @@ def _route_from_router(state: AgentState) -> str:
     After Router Node: if query is OUT_OF_SCOPE route directly to output
     (refusal already set in final_response); otherwise route to orchestrator.
 
+    HITL OVERRIDE: if a sync confirmation is pending, always route to
+    orchestrator regardless of how the router classified the message.
+    The router sees "Yes" / "Sync" as OUT_OF_SCOPE (no clinical keywords),
+    but the orchestrator's HITL pre-check is the correct handler for those
+    one-word confirmations.
+
     Args:
         state: Current AgentState after Router Node has run.
 
@@ -272,6 +306,11 @@ def _route_from_router(state: AgentState) -> str:
     Raises:
         Never — returns "orchestrator" as safe fallback.
     """
+    # HITL override: a pending sync confirmation must reach the orchestrator's
+    # pre-check, which is the only node that knows how to handle "yes"/"sync".
+    if state.get("pending_sync_confirmation"):
+        return "orchestrator"
+
     if state.get("routing_decision") == "out_of_scope":
         return "output"
     return "orchestrator"
@@ -287,10 +326,45 @@ def _route_from_extractor(state: AgentState) -> str:
     return "auditor"
 
 
+def _pdf_was_processed(state: AgentState) -> bool:
+    """
+    Return True if a clinical PDF was processed (freshly or from cache) in
+    the current session and at least one element was scanned.
+
+    Three independent signals — any one being truthy is enough:
+      1. pdf_source_file — PDF path was set in this turn's initial state.
+      2. extracted_pdf_pages — PDF text cache is populated (cache-hit or
+         fresh extraction on a follow-up turn).
+      3. tool_trace contains a 'clinical_marker_scan' entry — markers were
+         actually staged to evidence_staging this session, which is the
+         most reliable signal that elements_scanned > 0.
+
+    Args:
+        state: Current AgentState.
+
+    Returns:
+        bool: True when any signal indicates a PDF was processed.
+    """
+    if state.get("pdf_source_file"):
+        return True
+    if state.get("extracted_pdf_pages"):
+        return True
+    for entry in state.get("tool_trace", []):
+        if entry.get("tool") == "clinical_marker_scan":
+            elements = (entry.get("input") or {}).get("elements_scanned", 0)
+            if elements and int(elements) > 0:
+                return True
+    return False
+
+
 def _route_from_auditor(state: AgentState) -> str:
     """
-    Conditional edge function — reads routing_decision from state and returns
-    the name of the next node for LangGraph to route to.
+    Conditional edge after the Auditor Node.
+
+    Always routes to output first so the clinical response is synthesised.
+    The output node itself then conditionally hands off to comparison_node
+    (see _route_from_output) so the sync prompt is appended AFTER the
+    clinical summary — not before, which is what caused the silent discard.
 
     Args:
         state: Current AgentState after Auditor Node has run.
@@ -311,6 +385,58 @@ def _route_from_auditor(state: AgentState) -> str:
     if decision == "partial":
         return "output"
     return "output"
+
+
+def _route_from_output(state: AgentState) -> str:
+    """
+    Conditional edge after the Output Node.
+
+    Normal PDF path:
+        auditor → output (synthesise) → comparison (append sync prompt) → END
+
+    Post-sync guard:
+        sync_execution sets routing_decision = "sync_complete" before writing
+        final_response and exiting to END directly — it never passes through
+        _output_node at all.  This guard exists as a safety net in case the
+        graph wiring ever routes an unexpected state through output after sync,
+        preventing comparison from re-showing the sync prompt.
+
+    Args:
+        state: AgentState after Output Node has written final_response.
+
+    Returns:
+        str: "comparison" for PDF turns, "end" for everything else.
+
+    Raises:
+        Never — returns "end" as safe fallback.
+    """
+    # Never run comparison after a sync turn (sentinel set by sync_execution_node).
+    if state.get("routing_decision") == "sync_complete":
+        return "end"
+    if _pdf_was_processed(state):
+        return "comparison"
+    return "end"
+
+
+def _route_from_orchestrator(state: AgentState) -> str:
+    """
+    Conditional edge after orchestrator_node.
+
+    If the user's message is a sync confirmation (pending_sync_confirmation
+    was True and orchestrator cleared it, setting routing_decision="sync"),
+    route to sync_execution_node instead of extractor.
+
+    In all other cases, route to extractor as usual.
+
+    Args:
+        state: Current AgentState after Orchestrator Node has run.
+
+    Returns:
+        str: "sync_execution" or "extractor".
+    """
+    if state.get("routing_decision") == "sync":
+        return "sync_execution"
+    return "extractor"
 
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
@@ -342,6 +468,8 @@ def _build_graph(checkpointer: Optional[Any] = None):
     graph.add_node("extractor", extractor_node)
     graph.add_node("auditor", auditor_node)
     graph.add_node("clarification", clarification_node)
+    graph.add_node("comparison", comparison_node)
+    graph.add_node("sync_execution", sync_execution_node)
     graph.add_node("output", _output_node)
 
     graph.set_entry_point("router")
@@ -350,8 +478,13 @@ def _build_graph(checkpointer: Optional[Any] = None):
         _route_from_router,
         {"output": "output", "orchestrator": "orchestrator"},
     )
-    # Orchestrator always flows to extractor — it only sets tool_plan.
-    graph.add_edge("orchestrator", "extractor")
+    # Orchestrator routes to sync_execution when user confirmed a pending sync,
+    # otherwise proceeds normally to extractor.
+    graph.add_conditional_edges(
+        "orchestrator",
+        _route_from_orchestrator,
+        {"sync_execution": "sync_execution", "extractor": "extractor"},
+    )
     graph.add_conditional_edges(
         "extractor",
         _route_from_extractor,
@@ -361,16 +494,29 @@ def _build_graph(checkpointer: Optional[Any] = None):
         "auditor",
         _route_from_auditor,
         {
-            "output": "output",
-            "extractor": "extractor",
+            "output":        "output",
+            "extractor":     "extractor",
             "clarification": "clarification",
         },
     )
+    # output → comparison (PDF path) or END (non-PDF / post-sync path).
+    # comparison appends the sync prompt to the already-synthesised response,
+    # then exits to END — it never loops back through output again.
+    graph.add_conditional_edges(
+        "output",
+        _route_from_output,
+        {"comparison": "comparison", "end": END},
+    )
+    # comparison always exits to END — response is already fully built.
+    graph.add_edge("comparison", END)
+    # sync_execution exits to END directly — it builds its own complete
+    # final_response (with disclaimer) and sets routing_decision="sync_complete"
+    # so _route_from_output's guard never fires even on unexpected re-entry.
+    # Bypassing _output_node prevents the sync result from being overwritten
+    # by a fresh LLM synthesis and stops comparison from re-running.
+    graph.add_edge("sync_execution", END)
     # Clarification pauses here — workflow ends and waits for user input.
-    # Resume is handled by run_workflow() injecting clarification_response
-    # into a fresh invocation, bypassing the clarification node entirely.
     graph.add_edge("clarification", END)
-    graph.add_edge("output", END)
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -482,6 +628,13 @@ def run_workflow(
             # previously extracted PDF without re-attaching it.
             # The `not initial_state.get(field)` guard ensures explicit new
             # uploads win over carried-forward values.
+            #
+            # HITL fields (pending_sync_confirmation, sync_summary,
+            # staged_patient_fhir_id, staged_session_id) MUST be carried
+            # forward so the orchestrator pre-check can detect a pending sync
+            # confirmation on the next user turn (e.g. user replies "Yes").
+            # Without these, create_initial_state() resets the flag to False
+            # and "Yes" gets classified as an out-of-scope query.
             if prior_state and isinstance(prior_state, dict):
                 _cache_fields = [
                     "extracted_patient",
@@ -493,10 +646,20 @@ def run_workflow(
                     "tool_call_history",
                     "prior_query_context",
                     "messages",
+                    # HITL sync state — carried so "Yes" fires sync_execution
+                    "pending_sync_confirmation",
+                    "sync_summary",
+                    "staged_patient_fhir_id",
+                    "staged_session_id",
                 ]
                 for field in _cache_fields:
                     value = prior_state.get(field)
-                    if value and not initial_state.get(field):
+                    # Boolean fields need a special guard: `if value` would
+                    # skip False, but pending_sync_confirmation=True must pass.
+                    if field == "pending_sync_confirmation":
+                        if value is True:
+                            initial_state[field] = True
+                    elif value and not initial_state.get(field):
                         initial_state[field] = value
 
         # Layer 3 — SqliteSaver.from_conn_string() returns a context manager; we must

@@ -182,6 +182,19 @@ class AgentState(TypedDict):
                                 # Extractor reads this — not tool_plan=[] — to trigger the bypass,
                                 # so patient cache-hit paths (also tool_plan=[]) are not incorrectly skipped.
 
+    # ── Human-in-the-Loop Sync Confirmation (HITL) ──────────────────────────
+    # Set by comparison_node after a PDF is processed.  Cleared by
+    # sync_execution_node on completion, or by orchestrator_node when the
+    # user uploads a new PDF or responds with anything other than a sync
+    # confirmation — preventing stale flags from bleeding across patients.
+    pending_sync_confirmation: bool   # True = waiting for user "yes/sync" before posting to OpenEMR.
+    sync_summary: dict                # {"new": [...], "existing": [...], "total_raw": int}
+                                      #   new      — unique (marker, value) pairs not yet SYNCED
+                                      #   existing — pairs already SYNCED in a prior session
+                                      #   total_raw — total PENDING rows before dedup
+    staged_patient_fhir_id: str       # FHIR UUID for run_sync(); sourced from patient["fhir_id"].
+    staged_session_id: str            # evidence_staging session_id to sync when user confirms.
+
 
 def create_initial_state(query: str) -> AgentState:
     """
@@ -240,4 +253,9 @@ def create_initial_state(query: str) -> AgentState:
         "source_unavailable": False,
         "source_unavailable_reason": "",
         "is_general_knowledge": False,
+        # HITL sync fields — always initialised to safe defaults
+        "pending_sync_confirmation": False,
+        "sync_summary": {},
+        "staged_patient_fhir_id": "",
+        "staged_session_id": "",
     }

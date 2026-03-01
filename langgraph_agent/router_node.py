@@ -69,22 +69,30 @@ Classify the user query into exactly ONE of these six labels. Return only the la
 
 Labels:
 - MEDICATIONS     : Query asks what medications a patient is taking or prescribed.
-- ALLERGIES       : Query asks about a patient's known allergies.
+- ALLERGIES       : Query asks about a patient's known allergies or allergy review for a procedure.
 - INTERACTIONS    : Query asks about drug-drug interactions for a patient.
 - SAFETY_CHECK    : Query asks whether it is safe to give/prescribe a specific drug to a patient.
-- GENERAL_CLINICAL: Query is about healthcare, clinical data, or patient information but does not fit the above.
-- OUT_OF_SCOPE    : Query is not related to healthcare, clinical data, or patient information at all.
+- GENERAL_CLINICAL: Query is about healthcare, clinical data, patient information, insurance/payer
+                    policy verification, prior authorization, CPT code criteria, clinical note review,
+                    PDF document review, denial risk, or any other RCM/clinical topic not in the above.
+- OUT_OF_SCOPE    : Query is completely unrelated to healthcare, clinical data, or patient information.
 
 Examples:
-  "What medications is John Smith on?"            → MEDICATIONS
-  "Does she have any allergies?"                  → ALLERGIES
-  "Check drug interactions for Mary Johnson"      → INTERACTIONS
-  "Is it safe to give Robert Davis Aspirin?"      → SAFETY_CHECK
-  "Can I give penicillin to him?"                 → SAFETY_CHECK
-  "What conditions does John have?"               → GENERAL_CLINICAL
-  "Talk like a pirate"                            → OUT_OF_SCOPE
-  "What is the weather in Austin?"                → OUT_OF_SCOPE
-  "Write me a poem"                               → OUT_OF_SCOPE
+  "What medications is John Smith on?"                              → MEDICATIONS
+  "Does she have any allergies?"                                    → ALLERGIES
+  "Review John Smith's allergies for surgical prophylaxis"          → ALLERGIES
+  "Check drug interactions for Mary Johnson"                        → INTERACTIONS
+  "Is it safe to give Robert Davis Aspirin?"                        → SAFETY_CHECK
+  "Can I give penicillin to him?"                                   → SAFETY_CHECK
+  "What conditions does John have?"                                 → GENERAL_CLINICAL
+  "Verify if John Smith meets Cigna Medical Policy #012 for CPT 27447" → GENERAL_CLINICAL
+  "Does this patient meet Aetna criteria for knee replacement?"     → GENERAL_CLINICAL
+  "Review this clinical note for prior authorization"               → GENERAL_CLINICAL
+  "What is the denial risk for this claim?"                         → GENERAL_CLINICAL
+  "Analyze this PDF for insurance coverage"                         → GENERAL_CLINICAL
+  "Talk like a pirate"                                              → OUT_OF_SCOPE
+  "What is the weather in Austin?"                                  → OUT_OF_SCOPE
+  "Write me a poem"                                                 → OUT_OF_SCOPE
 """
 
 
