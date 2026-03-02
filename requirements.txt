@@ -26,6 +26,7 @@ langchain==0.3.27
 langchain-anthropic==0.3.22
 langchain-core==0.3.83
 langchain-text-splitters==0.3.11
+aiosqlite>=0.19.0
 langgraph==0.6.11
 langgraph-checkpoint==2.1.2
 langgraph-checkpoint-sqlite==2.0.4

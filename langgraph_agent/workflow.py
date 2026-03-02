@@ -672,8 +672,8 @@ async def stream_workflow(
 
         used_config = invoke_config if invoke_config else None
         try:
-            from langgraph.checkpoint.sqlite import SqliteSaver
-            with SqliteSaver.from_conn_string(_CHECKPOINT_DB) as checkpointer:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            async with AsyncSqliteSaver.from_conn_string(_CHECKPOINT_DB) as checkpointer:
                 graph = _build_graph(checkpointer=checkpointer)
                 async for chunk in graph.astream(
                     initial_state,
@@ -692,7 +692,7 @@ async def stream_workflow(
                     wait_for_all_tracers()
                 except Exception:
                     pass
-                snapshot = graph.get_state(used_config)
+                snapshot = await graph.aget_state(used_config)
                 if snapshot and getattr(snapshot, "values", None):
                     result_dict = dict(snapshot.values)
                     if "tool_trace" not in result_dict:
@@ -703,8 +703,8 @@ async def stream_workflow(
                 else:
                     yield {"event": "error", "error": "Workflow completed with no state."}
         except Exception:
-            # No checkpointer (e.g. SqliteSaver not available): use stream_mode="values"
-            # so the last chunk is the full state — get_state() would raise "No checkpointer set".
+            # No checkpointer (e.g. AsyncSqliteSaver not available): use stream_mode="values"
+            # so the last chunk is the full state — aget_state() would raise "No checkpointer set".
             graph = _build_graph(checkpointer=None)
             last_state = None
             async for chunk in graph.astream(
