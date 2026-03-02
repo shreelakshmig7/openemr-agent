@@ -958,6 +958,55 @@
 
   let threadId = generateThreadId();
 
+  // ── Restore last session on page load ────────────────────────────────────
+  async function restoreLastSession() {
+    try {
+      const histRes = await fetch('/history?limit=1');
+      if (!histRes.ok) return;
+      const sessions = await histRes.json();
+      if (!sessions || sessions.length === 0) return;
+
+      const lastSession = sessions[0];
+      const sid = lastSession.session_id;
+
+      const msgRes = await fetch(`/history/${encodeURIComponent(sid)}/messages`);
+      if (!msgRes.ok) return;
+      const messages = await msgRes.json();
+      if (!messages || messages.length === 0) return;
+
+      // Reuse the persisted session so follow-up questions work
+      threadId = sid;
+
+      // Remove the default welcome card before rendering history
+      const welcome = chat.querySelector('.welcome');
+      if (welcome) welcome.remove();
+
+      messages.forEach(msg => {
+        if (msg.role === 'user') {
+          appendUserMessage(msg.content || '');
+        } else {
+          const meta = msg.metadata || {};
+          appendAgentMessage({
+            answer:             msg.content || '',
+            confidence:         meta.confidence  ?? 0,
+            escalate:           meta.escalate    ?? false,
+            disclaimer:         meta.disclaimer  || '',
+            tool_trace:         meta.tool_trace  || [],
+            denial_risk:        meta.denial_risk || {},
+            citation_anchors:   meta.citation_anchors || [],
+            query_redacted_preview: null,
+            session_id:         sid,
+            thread_id:          sid,
+          });
+        }
+      });
+
+      chat.scrollTop = chat.scrollHeight;
+    } catch (_) {
+      // Silently ignore — a fresh session is still usable
+    }
+  }
+
   function handleNewCase() {
     threadId = generateThreadId();
     attachedPdfPath = null;
@@ -995,6 +1044,8 @@
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
+
+  restoreLastSession();
 
   // ── PDF viewer controls ───────────────────────────────────────────────────
 
