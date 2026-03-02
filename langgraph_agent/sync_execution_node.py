@@ -172,6 +172,7 @@ def sync_execution_node(state: AgentState) -> AgentState:
     superseded_count = sync_result.get("superseded_count", 0)
     failed_count     = sync_result.get("failed_count", 0)
     mapped_count     = sync_result.get("mapped_count", 0)
+    skipped_count    = sync_result.get("skipped_count", 0)
 
     logger.info(
         "sync_execution_node: complete | synced=%d superseded=%d failed=%d",
