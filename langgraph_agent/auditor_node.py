@@ -161,6 +161,7 @@ _SOURCE_LABELS = {
     "mock_data/medications.json": "Medications",
     "mock_data/interactions.json": "Drug Interactions",
     "mock_data/denial_patterns.json": "Denial Patterns",
+    "policy_search": "Payer Policy",
 }
 
 _SYNTHESIS_SYSTEM = """You are a clinical AI assistant summarizing verified healthcare data for a care team.
@@ -185,6 +186,11 @@ Rules:
 - For SAFETY_CHECK with an allergy conflict, begin with: "⚠️ ALLERGY CONFLICT: [drug] is contraindicated. Do NOT administer."
 - For SAFETY_CHECK with no conflict, begin with: "No known allergy conflict or drug interaction found for [drug] based on current records. Always verify with clinical judgment."
 - For prior authorization PDFs, structure as: Patient summary → Key clinical findings → Criteria status → Recommended action
+- For GENERAL_CLINICAL with policy criteria facts (lines starting with "[Policy ID] Criteria X MET" or "NOT MET"):
+  - State the policy name and how many criteria were met vs total (e.g. "0 of 3 criteria met")
+  - List each unmet criterion explicitly by name
+  - Give a clear determination: "Criteria ARE met" or "Criteria are NOT met"
+  - Do NOT say you lack access to the policy if criteria facts are present in the list below
 - For MEDICATIONS or ALLERGIES queries, respond with a brief factual list
 - For GENERAL_CLINICAL or INTERACTIONS, summarize the key clinical findings
 - Do not mention file names, JSON sources, or internal tool names
@@ -262,11 +268,20 @@ def _synthesize_response(
     Raises:
         Never — returns None on any LLM or parse failure.
     """
+    # Policy criteria extractions are marked synthetic=True so the auditor skips
+    # verbatim verification (they are tool-generated, not document quotes).
+    # However they MUST be included in the LLM facts — without them the model
+    # has no policy data and incorrectly says "I did not have access."
+    _POLICY_CRITERIA_FLAGS = {"CRITERIA_MET", "CRITERIA_UNMET", "NO_POLICY_FOUND"}
+
     try:
         facts = "\n".join(
             f"- {e['claim']}"
             for e in extractions
-            if e.get("claim") and not e.get("synthetic")
+            if e.get("claim") and (
+                not e.get("synthetic")
+                or e.get("flag") in _POLICY_CRITERIA_FLAGS
+            )
         )
         conflict_info = ""
         if allergy_conflict and allergy_conflict.get("conflict"):
