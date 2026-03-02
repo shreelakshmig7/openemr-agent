@@ -137,10 +137,21 @@ Each case follows this schema:
 
 | Field | Description |
 |---|---|
-| `pdf_source_file` | PDF path passed to `run_workflow` (reproducible: `mock_data/` only) |
+| `pdf_source_file` | PDF path passed to `run_workflow` — point to the PDFs in this folder |
 | `expected_confidence_max` | Pass if `confidence_score` ≤ this value |
 | `expected_escalate` | Pass if `escalate` flag matches (`true`/`false`) |
 | `expected_denial_risk` | Pass if `denial_risk.risk_level` matches |
+
+### Test PDFs (required for cases gs-036 to gs-052)
+
+17 eval cases reference clinical PDF documents for extraction and grounding. These PDFs are included in this folder:
+
+| File | Used For |
+|---|---|
+| `AgentForge_Test_ClinicalNote.pdf` | John Smith orthopedic clinical note — ICD/CPT alignment, laterality, allergy checks, drug interactions |
+| `AgentForge_Test_PriorAuth.pdf` | Maria Gonzalez oncology prior auth — Aetna CPB #0876 criteria, Palbociclib medical necessity, denial risk |
+
+When running cases gs-036–gs-052, set `pdf_source_file` to the path of these files relative to your working directory. All patient details in these PDFs are entirely fictional.
 
 ### Extending the dataset
 
@@ -161,6 +172,7 @@ This dataset contains **no Protected Health Information (PHI)** and is safe for 
 | File | Description |
 |---|---|
 | `golden_data.yaml` | Full benchmark dataset (62 cases as of v3.0) |
-| `run_eval.py` | Eval harness that executes cases and scores results |
-| `../mock_data/` | Fictional patient JSON fixtures used by the agent |
-| `../docs/AgentForge_PreSearch_Doc.md` | System architecture and design decisions |
+| `AgentForge_Test_ClinicalNote.pdf` | Clinical note PDF required for cases gs-036–gs-052 |
+| `AgentForge_Test_PriorAuth.pdf` | Prior auth PDF required for cases gs-036–gs-052 |
+| `../../../eval/run_eval.py` | Eval harness that executes cases and scores results |
+| `../../../docs/AgentForge_PreSearch_Doc.md` | System architecture and design decisions |
