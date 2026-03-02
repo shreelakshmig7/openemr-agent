@@ -45,11 +45,13 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from tools import get_patient_info as tool_get_patient_info
+from tools import _normalize_dob as _normalize_dob_tools
 from tools import get_medications as tool_get_medications
 from tools import get_allergies as tool_get_allergies
 from tools import check_drug_interactions as tool_check_drug_interactions
 from tools.policy_search import search_policy as tool_search_policy
 from pdf_extractor import extract_pdf as tool_extract_pdf
+from pdf_extractor import get_dob_from_pdf as tool_get_dob_from_pdf
 from denial_analyzer import analyze_denial_risk as tool_analyze_denial_risk
 from verification import check_allergy_conflict
 from langgraph_agent.state import AgentState
@@ -564,15 +566,33 @@ def extractor_node(state: AgentState) -> AgentState:
             state["tool_call_history"] = tool_call_history
             return state
 
+        # ── DOB for identity resolution (composite key: name + DOB) ─────────────
+        # When we have a PDF, extract DOB so same-name patients are not merged.
+        pdf_source_file_for_dob = (state.get("pdf_source_file") or "").strip()
+        lookup_dob: Optional[str] = _normalize_dob_tools(state.get("identified_patient_dob"))
+        if not lookup_dob and pdf_source_file_for_dob:
+            lookup_dob = tool_get_dob_from_pdf(pdf_source_file_for_dob)
+
         # ── Patient cache check ───────────────────────────────────────────────
         # If Orchestrator already cached the patient this session, skip Step 0
-        # and patient_lookup — use the cached record directly.
+        # and patient_lookup — unless we have a DOB that disagrees with cache
+        # (e.g. new PDF for a different same-name patient).
         cached_patient = state.get("extracted_patient") or {}
         use_patient_cache = (
             orchestrator_ran
             and "patient_lookup" not in tool_plan
             and bool(cached_patient)
         )
+        if use_patient_cache and lookup_dob:
+            cached_dob = _normalize_dob_tools(cached_patient.get("dob"))
+            if cached_dob and cached_dob != lookup_dob:
+                logger.info(
+                    "Extractor: cached patient DOB %s != requested DOB %s — invalidating cache (different identity).",
+                    cached_dob, lookup_dob,
+                )
+                state["extracted_patient"] = {}
+                cached_patient = {}
+                use_patient_cache = False
 
         patient = None
         patient_id = None
@@ -601,7 +621,7 @@ def extractor_node(state: AgentState) -> AgentState:
                 state["tool_call_history"] = tool_call_history
                 return state
 
-            patient_result = tool_get_patient_info(patient_identifier)
+            patient_result = tool_get_patient_info(patient_identifier, dob=lookup_dob)
             tool_trace.append({
                 "tool": "tool_get_patient_info",
                 "input": patient_identifier,
@@ -632,7 +652,7 @@ def extractor_node(state: AgentState) -> AgentState:
                 state["tool_call_history"] = tool_call_history
                 return state
 
-            patient_result = tool_get_patient_info(patient_identifier)
+            patient_result = tool_get_patient_info(patient_identifier, dob=lookup_dob)
             tool_trace.append({
                 "tool": "tool_get_patient_info",
                 "input": patient_identifier,
@@ -657,7 +677,9 @@ def extractor_node(state: AgentState) -> AgentState:
                     state["tool_call_history"] = tool_call_history
                     return state
 
-                # Scenario A — PDF provided but patient not in EHR.
+                # Scenario A — PDF provided but patient not in EHR (or name match, DOB different).
+                # Clear extracted_patient so we do not bleed prior cached patient into this identity.
+                state["extracted_patient"] = {}
                 logger.warning(
                     "Patient '%s' not found in EHR — proceeding from PDF only (Scenario A).",
                     patient_identifier,

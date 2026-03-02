@@ -479,11 +479,31 @@ def _post_soap_note_to_openemr(
                     name_parts = patient_name.replace(".", "").split()
                     given  = name_parts[0] if name_parts else ""
                     family = name_parts[-1] if len(name_parts) > 1 else ""
+                    # Use composite key (name + DOB) so we do not post to wrong same-name patient.
+                    patient_dob = (patient.get("dob") or "").strip()
                     try:
-                        bundle  = await client.get_patients(family=family, given=given)
+                        params = {"family": family, "given": given}
+                        if patient_dob:
+                            params["birthdate"] = patient_dob
+                        bundle  = await client.get_patients(**params)
                         entries = (bundle or {}).get("entry", [])
-                        if entries:
+                        resolved_by_dob = False
+                        if patient_dob and entries:
+                            # Filter to exact DOB match when DOB is known.
+                            matched = None
+                            for entry in entries:
+                                res = entry.get("resource", {})
+                                if (res.get("birthDate") or "").strip() == patient_dob:
+                                    matched = res
+                                    break
+                            if matched:
+                                resolved_uuid = matched["id"]
+                                resolved_by_dob = True
+                            else:
+                                entries = []
+                        if not resolved_by_dob and entries:
                             resolved_uuid = entries[0]["resource"]["id"]
+                        if resolved_by_dob or (entries and resolved_uuid != patient_fhir_id):
                             logger.info(
                                 "sync_execution_node: resolved real UUID %s "
                                 "for patient '%s' (was '%s').",

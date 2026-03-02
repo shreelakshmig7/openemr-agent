@@ -77,6 +77,7 @@ Fields to return:
     "needs_denial_analysis": true/false,
     "is_general_knowledge": true/false,
     "patient_name": "Full Name" or null,
+    "patient_dob": "YYYY-MM-DD or null (only if date of birth explicitly stated in query)",
     "payer_name": "payer name or ID as stated in query (lowercase)" or null,
     "procedure_identifier": "CPT code or procedure description as stated in query" or null,
     "data_source_required": "EHR" or "PDF" or "RESIDENT_NOTE" or "IMAGING" or "NONE",
@@ -102,6 +103,8 @@ Rules:
   rather than by name, return that identifier verbatim as patient_name.
   Return null if no name or identifier is stated — do NOT resolve identifiers
   to names from prior context.
+- patient_dob: Only if the query explicitly states a date of birth (e.g. "John Smith DOB 1990-05-20").
+  Use YYYY-MM-DD format. Return null if not stated.
 - payer_name: Only populate when needs_policy_check is true.
   Extract the payer/insurer name or ID exactly as stated in the query.
   Return lowercase (e.g. "Cigna" → "cigna", "Aetna" → "aetna", "BCB001" → "bcb001").
@@ -288,6 +291,7 @@ def _classify_query(query: str, prior_context: dict) -> dict:
         "needs_denial_analysis": False,
         "is_general_knowledge": False,
         "patient_name": None,
+        "patient_dob": None,
         "payer_name": None,
         "procedure_identifier": None,
         "data_source_required": "EHR",
@@ -341,6 +345,7 @@ def _classify_query(query: str, prior_context: dict) -> dict:
                 parsed["needs_policy_check"] = False
                 parsed["needs_denial_analysis"] = False
                 parsed["patient_name"] = None
+                parsed["patient_dob"] = None
                 parsed["data_source_required"] = "NONE"
                 parsed["pdf_required"] = False
 
@@ -631,6 +636,7 @@ def orchestrator_node(state: AgentState) -> AgentState:
                     )
 
         state["identified_patient_name"] = incoming_name
+        state["identified_patient_dob"] = intent.get("patient_dob")
 
         # ── Patient identity cache validation ──────────────────────────────
         # Compare the resolved incoming name against the cached patient name

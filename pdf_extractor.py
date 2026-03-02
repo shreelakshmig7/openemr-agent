@@ -193,6 +193,89 @@ def _get_page_number(el: Any) -> Optional[int]:
         return None
 
 
+# ── DOB extraction for identity resolution ────────────────────────────────────
+
+# Patterns for date of birth in clinical documents (order matters: more specific first).
+_DOB_PATTERNS = [
+    re.compile(
+        r"(?:DOB|Date\s+of\s+Birth|Birth\s+date|D\.O\.B\.?)\s*:?\s*"
+        r"(\d{4})-(\d{2})-(\d{2})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:DOB|Date\s+of\s+Birth|Birth\s+date|D\.O\.B\.?)\s*:?\s*"
+        r"(\d{1,2})/(\d{1,2})/(\d{4})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:DOB|Date\s+of\s+Birth|Birth\s+date|D\.O\.B\.?)\s*:?\s*"
+        r"(\d{1,2})-(\d{1,2})-(\d{4})",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),  # ISO in text
+]
+
+
+def _normalize_dob_to_iso(m: re.Match) -> Optional[str]:
+    """Convert regex match groups to YYYY-MM-DD. Returns None if invalid."""
+    try:
+        groups = m.groups()
+        if len(groups) != 3:
+            return None
+        g0, g1, g2 = groups
+        # 4-digit year identifies which group is year
+        if len(g0) == 4 and g0.isdigit():  # YYYY-MM-DD or YYYY-M-D
+            y, mth, d = int(g0), int(g1), int(g2)
+        elif len(g2) == 4 and g2.isdigit():  # MM/DD/YYYY or M/D/YYYY or MM-DD-YYYY
+            mth, d, y = int(g0), int(g1), int(g2)
+        else:
+            return None
+        if 1 <= mth <= 12 and 1 <= d <= 31 and 1900 <= y <= 2100:
+            return f"{y:04d}-{mth:02d}-{d:02d}"
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def get_dob_from_pdf(source_file: str) -> Optional[str]:
+    """
+    Extract a date of birth from the first few elements of a PDF for identity resolution.
+
+    Used when matching a patient by name + DOB so that "John Smith" (DOB 1990) is not
+    merged with "John Smith" (DOB 1965). Scans only the first few elements to avoid
+    full extraction cost when DOB is needed before patient lookup.
+
+    Args:
+        source_file: Path to the PDF file.
+
+    Returns:
+        ISO date string (YYYY-MM-DD) if found, else None.
+
+    Raises:
+        Never — returns None on any error.
+    """
+    if not source_file or not os.path.isfile(source_file):
+        return None
+    if not _is_api_available():
+        return None
+    try:
+        raw_elements = _call_unstructured_api(source_file, strategy="auto")
+        text_parts: List[str] = []
+        for el in raw_elements[:10]:  # First 10 elements only
+            text_parts.append(_get_element_text(el))
+        combined = " ".join(text_parts)
+        for pattern in _DOB_PATTERNS:
+            m = pattern.search(combined)
+            if m:
+                iso = _normalize_dob_to_iso(m)
+                if iso:
+                    logger.info("pdf_extractor: extracted DOB %s from '%s'", iso, os.path.basename(source_file))
+                    return iso
+    except Exception as e:
+        logger.debug("get_dob_from_pdf failed for %s: %s", source_file, e)
+    return None
+
+
 # ── API caller (isolated for mocking in tests) ────────────────────────────────
 
 def _call_unstructured_api(source_file: str, strategy: str = "hi_res") -> List[Any]:

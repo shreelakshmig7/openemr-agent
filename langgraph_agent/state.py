@@ -174,6 +174,7 @@ class AgentState(TypedDict):
     tool_plan: List[str]
     orchestrator_ran: bool      # True once Orchestrator Node has set tool_plan intentionally.
     identified_patient_name: Optional[str]  # Patient name extracted by Orchestrator's single Haiku call.
+    identified_patient_dob: Optional[str]   # Patient DOB (ISO YYYY-MM-DD) when stated in query or from PDF; for composite-key identity resolution.
     orchestrator_fallback: bool  # True when all Haiku retries failed and regex fallback was used.
     data_source_required: str   # Data source the query needs: EHR / PDF / RESIDENT_NOTE / IMAGING / NONE.
     source_unavailable: bool    # True when required source (PDF/note) was not attached.
@@ -248,6 +249,7 @@ def create_initial_state(query: str) -> AgentState:
         "tool_plan": [],
         "orchestrator_ran": False,
         "identified_patient_name": None,
+        "identified_patient_dob": None,
         "orchestrator_fallback": False,
         "data_source_required": "NONE",
         "source_unavailable": False,
