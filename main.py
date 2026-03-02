@@ -10,10 +10,12 @@ pause/resume. Provides endpoints for health check, natural language
 queries, eval execution, and eval result retrieval.
 
 Endpoints:
-    GET  /health        — Service health check
-    POST /ask           — Natural language query with session context
-    POST /eval          — Run eval suite and return results
-    GET  /eval/results  — Return latest saved eval results
+    GET  /health                        — Service health check
+    POST /ask                           — Natural language query with session context
+    GET  /history                       — Recent session list for the audit history sidebar
+    GET  /history/{session_id}/messages — Full message transcript for a session
+    POST /eval                          — Run eval suite and return results
+    GET  /eval/results                  — Return latest saved eval results
 
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
@@ -26,6 +28,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import logging
+
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, Query, Header, HTTPException
@@ -36,8 +40,16 @@ from pydantic import BaseModel
 from langgraph_agent.workflow import run_workflow, get_state_for_audit
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 from eval.run_eval import run_eval, DEFAULT_GOLDEN_DATA_PATH
+import database
 
 load_dotenv()
+
+# Enable INFO-level logging for all agent modules so staging/sync traces appear
+# in the uvicorn terminal without needing --log-level debug on the server.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s [%(name)s] %(message)s",
+)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -48,6 +60,9 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+# Ensure SQLite tables exist (idempotent — safe to run on every startup).
+database.init_db()
 
 # ── In-memory session store ────────────────────────────────────────────────────
 # Keyed by session_id. Each value is the last AgentState dict returned by run_workflow.
@@ -69,6 +84,7 @@ app.add_middleware(
         "http://localhost:8300",
         "https://localhost:9300",
         "http://127.0.0.1:8300",
+        "http://64.225.50.120:8300",   # production DigitalOcean OpenEMR
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -195,6 +211,21 @@ def _resolve_pdf_path(pdf_source_file: Optional[str]) -> Optional[str]:
         base_real = os.path.realpath(base)
         resolved_real = os.path.realpath(resolved)
         if resolved_real != base_real and not resolved_real.startswith(base_real + os.sep):
+            # Path escapes the app root (e.g. a stale Docker-container path like
+            # /app/uploads/foo.pdf sent from a previous environment).  Try to
+            # recover by looking for the bare filename in the local uploads dir.
+            uploads_real = os.path.realpath(os.path.join(base_real, "uploads"))
+            filename = os.path.basename(resolved)
+            if filename:
+                fallback = os.path.join(uploads_real, filename)
+                if os.path.isfile(fallback):
+                    logger.info(
+                        "_resolve_pdf_path: stale absolute path '%s' recovered via "
+                        "uploads fallback → '%s'",
+                        path,
+                        fallback,
+                    )
+                    return fallback
             return None
     except Exception:
         return None
@@ -304,10 +335,63 @@ def ask(request: AskRequest) -> AskResponse:
 
     _sessions[session_id] = result
 
+    # Resolve the agent reply fields first so they are in scope for DB persistence below.
     answer = result.get("final_response") or result.get("clarification_needed") or "Unable to process request."
     confidence = result.get("confidence_score", 0.0)
-    escalate = confidence < CLINICAL_SAFETY_RULES["confidence_threshold"] or result.get("is_partial", False)
+    denial_risk_level = (result.get("denial_risk") or {}).get("risk_level", "")
+    # Escalate on low confidence, partial results, OR HIGH/CRITICAL denial risk.
+    # A confirmed CONTRAINDICATED interaction or critical documentation gap
+    # always requires physician review regardless of confidence score.
+    escalate = (
+        confidence < CLINICAL_SAFETY_RULES["confidence_threshold"]
+        or result.get("is_partial", False)
+        or denial_risk_level in ("HIGH", "CRITICAL")
+    )
     disclaimer = CLINICAL_SAFETY_RULES["disclaimer"]
+
+    # Persist session metadata and message transcript. Wrapped in try/except
+    # so a DB hiccup never breaks the /ask response.
+    try:
+        # identified_patient_name: set by Orchestrator Haiku on every request (Optional[str]).
+        # query_intent: set by Router Node — MEDICATIONS | ALLERGIES | INTERACTIONS |
+        #               SAFETY_CHECK | GENERAL_CLINICAL | OUT_OF_SCOPE (always a str).
+        # extracted_patient: full patient dict from EHR lookup; "id" is the patient PID.
+        patient_name = (result.get("identified_patient_name") or "").strip()
+        patient_pid  = str((result.get("extracted_patient") or {}).get("id", ""))
+        intent       = str(result.get("query_intent", "") or "")
+        database.upsert_session(
+            session_id,
+            patient_name=patient_name,
+            patient_pid=patient_pid,
+            query_summary=query[:80],
+            intent=intent,
+        )
+        # Store user turn — use request.question (what the user typed),
+        # and the original relative pdf path (not the resolved absolute path).
+        database.insert_message(
+            session_id,
+            role="user",
+            content=request.question,
+            metadata=None,
+            pdf_path=request.pdf_source_file or "",
+        )
+        # Store agent turn with full rich metadata for transcript replay.
+        database.insert_message(
+            session_id,
+            role="agent",
+            content=answer,
+            metadata={
+                "confidence":       confidence,
+                "escalate":         escalate,
+                "disclaimer":       disclaimer,
+                "tool_trace":       result.get("tool_trace", []),
+                "denial_risk":      result.get("denial_risk") or {},
+                "citation_anchors": result.get("citation_anchors") or [],
+            },
+            pdf_path="",
+        )
+    except Exception:
+        pass
 
     return AskResponse(
         answer=answer,
@@ -321,6 +405,48 @@ def ask(request: AskRequest) -> AskResponse:
         denial_risk=result.get("denial_risk") or {},
         citation_anchors=result.get("citation_anchors") or [],
     )
+
+
+@app.get("/history")
+def get_history(limit: int = Query(default=30, ge=1, le=100)) -> list:
+    """
+    Return recent agent sessions for the audit history sidebar.
+
+    Each entry contains session_id, patient_name, patient_pid, query_summary,
+    intent, created_at, and updated_at — enough for the sidebar to render a
+    labelled entry and resume the session when clicked.
+
+    Args:
+        limit: Maximum sessions to return (1–100, default 30).
+
+    Returns:
+        list: Session metadata dicts ordered by updated_at descending.
+    """
+    try:
+        return database.get_recent_sessions(limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/history/{session_id}/messages")
+def get_session_messages(session_id: str) -> list:
+    """
+    Return the full message transcript for a session, ordered chronologically.
+
+    Used by the OpenEMR sidebar to replay chat history when the user clicks
+    a past session entry. Each entry contains role (user/agent), content,
+    metadata (agent rich data), pdf_path, and created_at.
+
+    Args:
+        session_id: The session / thread ID to fetch.
+
+    Returns:
+        list: Message dicts ordered oldest-first.
+    """
+    try:
+        return database.get_session_messages(session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/audit/{thread_id}")
@@ -370,6 +496,47 @@ def get_audit_trail(
         "tool_call_history": state.get("tool_call_history", []),
         "ehr_confidence_penalty": state.get("ehr_confidence_penalty", 0),
     }
+
+
+class SaveMessageRequest(BaseModel):
+    """Request body for POST /save-message (navigator.sendBeacon on tab close)."""
+    session_id: str
+    content: str
+    role: str = "user"
+
+
+@app.post("/save-message")
+def save_message(request: SaveMessageRequest) -> dict:
+    """
+    Persist a single message without running the agent workflow.
+
+    Called via navigator.sendBeacon when the tab is closed mid-request so
+    the user's in-flight question is not silently lost. The session row is
+    upserted with minimal metadata if it does not already exist.
+
+    Args:
+        request: SaveMessageRequest with session_id, content, and role.
+
+    Returns:
+        dict: {"ok": bool}
+    """
+    try:
+        session_id = (request.session_id or "").strip()
+        content    = (request.content or "").strip()
+        role       = request.role if request.role in ("user", "agent") else "user"
+        if not session_id or not content:
+            return {"ok": False}
+        database.upsert_session(
+            session_id,
+            patient_name="",
+            patient_pid="",
+            query_summary=content[:80],
+            intent="",
+        )
+        database.insert_message(session_id, role=role, content=content, metadata=None, pdf_path="")
+        return {"ok": True}
+    except Exception:
+        return {"ok": False}
 
 
 @app.post("/upload")

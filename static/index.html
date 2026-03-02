@@ -1176,6 +1176,11 @@
 
   // ── Send message ──────────────────────────────────────────────────────────
 
+  // Tracks the user message currently in-flight to /ask. If the tab is closed
+  // before the response arrives, pagehide will beacon this to /save-message so
+  // the question is not silently lost from the session transcript.
+  let _pendingBeaconData = null;
+
   async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
@@ -1188,6 +1193,10 @@
     const userLabel = pdfUsed ? `${text}\n📎 ${pdfUsed.split('/').pop()}` : text;
     appendUserMessage(userLabel);
     const typing = appendTyping();
+
+    // Mark this question as pending so pagehide can beacon it if the tab closes
+    // before the /ask response comes back.
+    _pendingBeaconData = { session_id: threadId, content: text, role: 'user' };
 
     try {
       const body = { question: text, thread_id: threadId };
@@ -1212,10 +1221,27 @@
       removeTyping();
       appendErrorMessage('Could not reach the server. Please check your connection and try again.');
     } finally {
+      // Request completed (success or error) — clear the pending beacon so a
+      // normal tab close doesn't duplicate the message.
+      _pendingBeaconData = null;
       sendBtn.disabled = false;
       input.focus();
     }
   }
+
+  // ── Tab-close / navigation-away safety net ────────────────────────────────
+  // pagehide fires reliably on tab close, window close, and navigation away
+  // (unlike beforeunload which modern browsers restrict). If a /ask request
+  // is still in-flight when the tab closes, beacon the user's question to
+  // /save-message so it lands in the session transcript.
+  window.addEventListener('pagehide', function () {
+    if (!_pendingBeaconData) return;
+    const blob = new Blob(
+      [JSON.stringify(_pendingBeaconData)],
+      { type: 'application/json' }
+    );
+    navigator.sendBeacon('/save-message', blob);
+  });
 
   function scrollBottom() { chat.scrollTop = chat.scrollHeight; }
 

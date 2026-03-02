@@ -8,5 +8,6 @@ __pycache__/
 .venv/
 uploads/
 agent_checkpoints.sqlite
-tests/results/*.json
+# eval result JSONs are committed (Option A — Railway ephemeral filesystem)
+# keep only the latest 2-3 runs; delete older files before committing
 tests/results/*.txt

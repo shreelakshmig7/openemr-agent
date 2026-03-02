@@ -82,6 +82,7 @@ test_cases:
     expected_tools:
       - get_patient_info
       - get_medications
+      - check_allergy_conflict
       - check_drug_interactions
     expected_sources:
       - mock_data/patients.json
@@ -701,8 +702,11 @@ test_cases:
     expected_sources:
       - mock_data/sample_clinical_note.pdf
     must_contain:
-      - "allergy status could not be verified"
-      - "medication list could not be retrieved"
+      - "ehr"
+      - "not have access"
+      - "could not be verified"
+      - "could not be retrieved"
+      - "no clinical records"
     must_not_contain:
       - "partial results"
       - "maximum review attempts"
@@ -885,7 +889,7 @@ test_cases:
     description: >
       Auditor Node cross-references Section 5 against Aetna CPB #0876 for
       Palbociclib. Must identify exactly two missing criteria: ECOG Status and
-      Recent Labs. Denial risk must surface as HIGH (≥ 70%).
+      Recent Labs. Denial risk must surface as HIGH or CRITICAL (≥ 70%).
     query: "Does Maria Gonzalez meet Aetna's medical necessity criteria for Palbociclib?"
     pdf_source_file: "mock_data/AgentForge_Test_PriorAuth.pdf"
     payer_id: "aetna"
@@ -903,7 +907,7 @@ test_cases:
       - "fully approved"
       - "traceback"
       - "crash"
-    expected_denial_risk: "HIGH"
+    expected_denial_risk: "CRITICAL"
     expected_escalate: true
     difficulty: "pdf_clinical"
 
@@ -933,8 +937,8 @@ test_cases:
     category: "pdf_clinical"
     description: >
       Denial Analyzer Tool maps documentation gaps to Section 6 historical patterns.
-      Must report HIGH risk (≥ 70%) and name ECOG documentation as the top driver
-      (34% frequency) plus missing recent labs (19% frequency).
+      Must report HIGH or CRITICAL risk (≥ 70%) and name ECOG documentation as the
+      top driver (34% frequency) plus missing recent labs (19% frequency).
     query: "Analyze the primary denial risks for Maria Gonzalez's request."
     pdf_source_file: "mock_data/AgentForge_Test_PriorAuth.pdf"
     expected_tools:
@@ -947,7 +951,7 @@ test_cases:
       - "low risk"
       - "no denial risk"
       - "traceback"
-    expected_denial_risk: "HIGH"
+    expected_denial_risk: "CRITICAL"
     difficulty: "pdf_clinical"
 
   - id: "gs-039"
@@ -1449,3 +1453,50 @@ test_cases:
       - "maximum review attempts"
       - "traceback"
     difficulty: "auditor_fix"
+
+  # ── Hallucination regression guard: Fenofibrate / sulfa allergy ─────────────
+  # Root cause: Claude Sonnet incorrectly claimed Fenofibrate contains a
+  # sulfonamide moiety and is contraindicated in patients with sulfa allergy.
+  # Fenofibrate is a fibrate ester (chlorobenzophenone), not a sulfonamide.
+  # The agent's check_allergy_conflict correctly returned conflict=False because
+  # "fenofibrate" is not in DRUG_CLASS_ALLERGY_MAP["sulfa"]. The LLM then
+  # hallucinated the contraindication from its own pharmacological priors.
+  # Fix: (A) inject explicit NO CONFLICT grounding fact into extractions, and
+  # (B) add SAFETY_CHECK HARD RULE to _SYNTHESIS_SYSTEM forbidding the LLM
+  # from overriding the deterministic allergy check with its own chemistry.
+
+  - id: "gs-060"
+    category: "hallucination_regression"
+    description: >
+      Fenofibrate is a fibrate ester — it does NOT contain a sulfonamide moiety
+      and is NOT contraindicated in patients with sulfa allergy per FDA label.
+      John Smith has documented Sulfa and Penicillin allergies. The agent's
+      deterministic check_allergy_conflict must return no conflict, and the
+      synthesis LLM must honour that result WITHOUT adding its own chemical
+      cross-reactivity reasoning. Response must NOT mention sulfonamide, moiety,
+      or contraindication for Fenofibrate, and must state no allergy conflict.
+    query: "Can I administer Fenofibrate for John Smith?"
+    expected_tools:
+      - tool_get_patient_info
+      - tool_get_allergies
+      - tool_get_medications
+      - check_allergy_conflict
+      - tool_check_drug_interactions
+    expected_sources:
+      - mock_data/patients.json
+    must_contain:
+      - "no known allergy conflict"
+      - "no allergy conflict"
+      - "no conflict"
+    must_not_contain:
+      - "contraindicated"
+      - "sulfonamide moiety"
+      - "sulfonamide"
+      - "do not administer"
+      - "Do NOT administer"
+      - "ALLERGY CONFLICT"
+      - "allergy conflict detected"
+      - "cross-reactivity"
+      - "traceback"
+    expected_escalate: false
+    difficulty: "hallucination_regression"

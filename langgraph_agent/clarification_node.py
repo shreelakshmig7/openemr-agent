@@ -20,43 +20,25 @@ Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
 """
 
-import re
-
 from langgraph_agent.state import AgentState
-
-
-# ── PII scrubber (same stub as extractor_node) ────────────────────────────────
-
-# TODO: Replace with Microsoft Presidio in PII infrastructure PR
-_SSN_PATTERN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-_MRN_PATTERN = re.compile(r"\bMRN[:\s]*\w+\b", re.IGNORECASE)
-_DOB_PATTERN = re.compile(r"\b(DOB|Date of Birth)[:\s]*[\d/\-]+\b", re.IGNORECASE)
-_PHONE_PATTERN = re.compile(r"\b\d{3}[.\-]\d{3}[.\-]\d{4}\b")
-_EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b")
+from tools.pii_scrubber import scrub_pii
 
 
 def _scrub_pii_from_question(text: str) -> str:
     """
-    Remove HIPAA PII patterns from the clarification question before surfacing to user.
+    Remove HIPAA PII from the clarification question before surfacing to the user.
+    Delegates to Presidio-based scrub_pii() (NLP + custom pattern recognizers).
 
     Args:
-        text: Raw clarification question that may contain PII patterns.
+        text: Raw clarification question that may contain PII.
 
     Returns:
-        str: Question with PII replaced by [REDACTED] placeholders.
+        str: Question with PII replaced by typed placeholders (e.g. <PERSON>).
 
     Raises:
-        Never — returns original text unchanged if scrubbing fails.
+        Never — scrub_pii() itself never raises; returns original text on failure.
     """
-    try:
-        text = _SSN_PATTERN.sub("[REDACTED-SSN]", text)
-        text = _MRN_PATTERN.sub("[REDACTED-MRN]", text)
-        text = _DOB_PATTERN.sub("[REDACTED-DOB]", text)
-        text = _PHONE_PATTERN.sub("[REDACTED-PHONE]", text)
-        text = _EMAIL_PATTERN.sub("[REDACTED-EMAIL]", text)
-        return text
-    except Exception:
-        return text
+    return scrub_pii(text)
 
 
 # ── Clarification Node ────────────────────────────────────────────────────────

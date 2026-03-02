@@ -12,14 +12,23 @@ Table: evidence_staging
   - sync_status transitions: PENDING → SYNCED (after FHIR POST) or FAILED.
   - fhir_observation_id is populated by the sync worker after a successful POST.
 
+Table: sessions
+  - One row per agent session (thread_id). Upserted after every /ask call.
+  - Drives the audit history sidebar in the OpenEMR UI.
+
 DB file: evidence_staging.sqlite  (same directory as this module)
 
 Public API:
-    init_db()               — Create table + indexes if absent. Idempotent.
+    init_db()               — Create tables + indexes if absent. Idempotent.
     get_connection()        — Context-manager yielding an open sqlite3.Connection.
     insert_clinical_marker()— INSERT one marker row with sync_status='PENDING'.
     get_pending_markers()   — SELECT all PENDING rows (optionally scoped to session).
     update_sync_status()    — UPDATE sync_status + fhir_observation_id after sync.
+    upsert_session()        — INSERT or UPDATE one session metadata row.
+    get_recent_sessions()   — SELECT recent sessions for the audit history sidebar.
+    insert_message()        — INSERT one user or agent message turn.
+    get_session_messages()  — SELECT all turns for a session (transcript replay).
+    get_session_last_pdf()  — SELECT the last PDF path used in a session.
 
 Author: Shreelakshmi Gopinatha Rao
 Project: AgentForge — Healthcare RCM AI Agent
@@ -44,6 +53,36 @@ _DB_PATH: Path = Path(__file__).parent / "evidence_staging.sqlite"
 # ---------------------------------------------------------------------------
 # Schema DDL
 # ---------------------------------------------------------------------------
+_MESSAGES_DDL = """
+CREATE TABLE IF NOT EXISTS session_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT    NOT NULL,
+    role        TEXT    NOT NULL DEFAULT '',
+    content     TEXT    NOT NULL DEFAULT '',
+    metadata    TEXT,
+    pdf_path    TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sm_session ON session_messages (session_id, created_at);
+"""
+
+_SESSIONS_DDL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT    NOT NULL UNIQUE,
+    patient_name  TEXT    NOT NULL DEFAULT '',
+    patient_pid   TEXT    NOT NULL DEFAULT '',
+    query_summary TEXT    NOT NULL DEFAULT '',
+    intent        TEXT    NOT NULL DEFAULT '',
+    created_at    TEXT    NOT NULL,
+    updated_at    TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_patient ON sessions (patient_name);
+"""
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS evidence_staging (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +152,8 @@ def init_db(db_path: Optional[Path] = None) -> None:
     path = db_path or _DB_PATH
     with sqlite3.connect(str(path)) as conn:
         conn.executescript(_DDL)
+        conn.executescript(_SESSIONS_DDL)
+        conn.executescript(_MESSAGES_DDL)
         conn.commit()
     logger.info("evidence_staging DB ready at '%s'.", path)
 
@@ -447,15 +488,20 @@ def promote_failed_to_synced(
     champion_ids:   list = []
     superseded_ids: list = []
 
-    for group in groups.values():
+    for key, group in groups.items():
         if not group:
             continue
-        # Champion = row with the most raw_text characters.
-        champion = max(group, key=lambda r: len(str(r.get("raw_text") or "")))
-        champion_ids.append(champion["id"])
-        for row in group:
-            if row["id"] != champion["id"]:
-                superseded_ids.append(row["id"])
+        _marker_value = key[1]  # normalised value from the group key
+        if _marker_value:
+            # Non-empty value: champion row is the one with richest raw_text.
+            champion = max(group, key=lambda r: len(str(r.get("raw_text") or "")))
+            champion_ids.append(champion["id"])
+            for row in group:
+                if row["id"] != champion["id"]:
+                    superseded_ids.append(row["id"])
+        else:
+            # Empty value: no clinical fact to sync — mark all as SUPERSEDED.
+            superseded_ids.extend(r["id"] for r in group)
 
     promoted = 0
     with get_connection(db_path) as conn:
@@ -478,6 +524,96 @@ def promote_failed_to_synced(
     return promoted
 
 
+def promote_pending_to_synced(
+    session_id: str,
+    db_path: Optional[Path] = None,
+) -> tuple:
+    """
+    Promote all PENDING rows for a session to SYNCED (champions) or SUPERSEDED
+    (duplicates) and return ``(synced_count, superseded_count)`` as a tuple.
+
+    Companion to ``promote_failed_to_synced()`` — handles the case where
+    ``sync_node`` exited before it could mark PENDING rows as FAILED (e.g.
+    when ``patient_fhir_id`` was empty and the early-return guard fired).
+    Those rows remain ``PENDING`` and are invisible to ``promote_failed_to_synced``.
+
+    Called by ``sync_execution_node`` as a second-attempt local-audit fallback
+    when ``promote_failed_to_synced()`` returns 0.
+
+    Returns separate champion and superseded counts (unlike the int-only return
+    of ``promote_failed_to_synced``) so the caller can report accurate
+    ``synced_count`` / ``superseded_count`` without needing ``mapped_count``
+    as a bounding value.
+
+    Args:
+        session_id: The session whose PENDING rows should be promoted.
+        db_path:    Override DB file location (tests only).
+
+    Returns:
+        Tuple[int, int]: ``(synced_count, superseded_count)`` where
+            ``synced_count``     = number of champion rows promoted to SYNCED,
+            ``superseded_count`` = number of duplicate rows promoted to SUPERSEDED.
+
+    Raises:
+        sqlite3.Error: on I/O failures.
+    """
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            "SELECT id, marker_name, marker_value, raw_text "
+            "FROM evidence_staging "
+            "WHERE sync_status = 'PENDING' AND session_id = ? "
+            "ORDER BY created_at",
+            (session_id,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+
+    if not rows:
+        return (0, 0)
+
+    from collections import defaultdict as _defaultdict
+    groups: dict = _defaultdict(list)
+    for row in rows:
+        key = (
+            (row.get("marker_name") or "").strip().lower(),
+            (row.get("marker_value") or "").strip().lower(),
+        )
+        groups[key].append(row)
+
+    champion_ids:   list = []
+    superseded_ids: list = []
+
+    for group in groups.values():
+        if not group:
+            continue
+        champion = max(group, key=lambda r: len(str(r.get("raw_text") or "")))
+        champion_ids.append(champion["id"])
+        for row in group:
+            if row["id"] != champion["id"]:
+                superseded_ids.append(row["id"])
+
+    with get_connection(db_path) as conn:
+        now = datetime.now(timezone.utc).isoformat()
+        if champion_ids:
+            conn.execute(
+                f"UPDATE evidence_staging SET sync_status = 'SYNCED', updated_at = ? "
+                f"WHERE id IN ({','.join('?' * len(champion_ids))})",
+                [now, *champion_ids],
+            )
+        if superseded_ids:
+            conn.execute(
+                f"UPDATE evidence_staging SET sync_status = 'SUPERSEDED', updated_at = ? "
+                f"WHERE id IN ({','.join('?' * len(superseded_ids))})",
+                [now, *superseded_ids],
+            )
+
+    logger.debug(
+        "evidence_staging: promote_pending_to_synced session=%s → "
+        "synced=%d superseded=%d.",
+        session_id, len(champion_ids), len(superseded_ids),
+    )
+    return (len(champion_ids), len(superseded_ids))
+
+
 def get_markers_by_session(
     session_id: str,
     db_path: Optional[Path] = None,
@@ -498,5 +634,228 @@ def get_markers_by_session(
         cur = conn.execute(
             "SELECT * FROM evidence_staging WHERE session_id = ? ORDER BY created_at",
             (session_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Session history — audit sidebar support
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Message history — transcript replay support
+# ---------------------------------------------------------------------------
+
+def insert_message(
+    session_id: str,
+    role: str,
+    content: str,
+    metadata: Optional[dict] = None,
+    pdf_path: str = "",
+    db_path: Optional[Path] = None,
+) -> None:
+    """
+    INSERT one conversation turn into ``session_messages``.
+
+    Called by the FastAPI ``/ask`` endpoint after every successful workflow
+    run — once for the user's question and once for the agent's response.
+    Enables full transcript replay when a sidebar session is clicked.
+
+    Args:
+        session_id: LangGraph thread / session ID.
+        role:       ``"user"`` or ``"agent"``.
+        content:    The message text.
+        metadata:   Agent-only JSON-serialisable dict containing confidence,
+                    escalate, disclaimer, tool_trace, denial_risk,
+                    citation_anchors. ``None`` for user turns.
+        pdf_path:   Relative path of the PDF attached to this user turn
+                    (e.g. ``"uploads/report.pdf"``). Empty string when no PDF.
+        db_path:    Override DB file location (tests only).
+
+    Raises:
+        sqlite3.Error: on I/O failures.
+    """
+    import json as _json
+    now          = datetime.now(timezone.utc).isoformat()
+    metadata_str = _json.dumps(metadata) if metadata is not None else None
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO session_messages
+                (session_id, role, content, metadata, pdf_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, role, content or "", metadata_str, pdf_path or "", now),
+        )
+
+    logger.debug(
+        "session_messages: inserted role=%s session=%s.",
+        role, session_id,
+    )
+
+
+def get_session_messages(
+    session_id: str,
+    db_path: Optional[Path] = None,
+) -> List[dict]:
+    """
+    Return all message turns for a session, ordered chronologically.
+
+    Used by ``GET /history/{session_id}/messages`` to replay the transcript
+    when the user clicks a sidebar entry.
+
+    Args:
+        session_id: The session to query.
+        db_path:    Override DB file location (tests only).
+
+    Returns:
+        List[dict]: One dict per turn with keys:
+                    role, content, metadata (parsed dict or None), pdf_path,
+                    created_at.
+    """
+    import json as _json
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            SELECT role, content, metadata, pdf_path, created_at
+              FROM session_messages
+             WHERE session_id = ?
+             ORDER BY created_at ASC
+            """,
+            (session_id,),
+        )
+        rows = []
+        for row in cur.fetchall():
+            r = dict(row)
+            if r.get("metadata"):
+                try:
+                    r["metadata"] = _json.loads(r["metadata"])
+                except Exception:
+                    r["metadata"] = None
+            else:
+                r["metadata"] = None
+            rows.append(r)
+        return rows
+
+
+def get_session_last_pdf(
+    session_id: str,
+    db_path: Optional[Path] = None,
+) -> str:
+    """
+    Return the relative path of the last PDF uploaded in a session.
+
+    Used when resuming a session to auto-restore the PDF badge without
+    requiring the user to re-upload the same document.
+
+    Args:
+        session_id: The session to query.
+        db_path:    Override DB file location (tests only).
+
+    Returns:
+        str: Relative PDF path (e.g. ``"uploads/report.pdf"``) or ``""``
+             if no PDF was ever attached in this session.
+    """
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            SELECT pdf_path FROM session_messages
+             WHERE session_id = ? AND pdf_path != ''
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (session_id,),
+        )
+        row = cur.fetchone()
+        return row["pdf_path"] if row else ""
+
+
+def upsert_session(
+    session_id: str,
+    *,
+    patient_name: str = "",
+    patient_pid: str = "",
+    query_summary: str = "",
+    intent: str = "",
+    db_path: Optional[Path] = None,
+) -> None:
+    """
+    INSERT or UPDATE one row in the ``sessions`` table.
+
+    Called by the FastAPI ``/ask`` endpoint after every successful workflow
+    run so the audit history sidebar always reflects the latest state of
+    each session.  Uses ``INSERT OR REPLACE`` so repeated calls for the
+    same ``session_id`` update the row in place rather than creating duplicates.
+
+    Args:
+        session_id:    LangGraph thread / session ID (primary key).
+        patient_name:  Human-readable patient name (e.g. ``"Maria Gonzalez"``).
+        patient_pid:   OpenEMR numeric patient ID (e.g. ``"10"``).
+        query_summary: First ~80 chars of the user's question.
+        intent:        Routing decision from the orchestrator (e.g. ``"MEDICATIONS"``).
+        db_path:       Override DB file location (tests only).
+
+    Raises:
+        sqlite3.Error: on I/O failures.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    query_summary = (query_summary or "")[:80]
+
+    with get_connection(db_path) as conn:
+        existing = conn.execute(
+            "SELECT created_at FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        created_at = existing["created_at"] if existing else now
+
+        conn.execute(
+            """
+            INSERT INTO sessions
+                (session_id, patient_name, patient_pid, query_summary, intent,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                patient_name  = excluded.patient_name,
+                patient_pid   = excluded.patient_pid,
+                query_summary = excluded.query_summary,
+                intent        = excluded.intent,
+                updated_at    = excluded.updated_at
+            """,
+            (session_id, patient_name, patient_pid, query_summary, intent,
+             created_at, now),
+        )
+
+    logger.debug(
+        "sessions: upserted session_id=%s patient=%r intent=%s.",
+        session_id, patient_name or "<unknown>", intent or "<none>",
+    )
+
+
+def get_recent_sessions(
+    limit: int = 30,
+    db_path: Optional[Path] = None,
+) -> List[dict]:
+    """
+    Return the most recently updated sessions for the audit history sidebar.
+
+    Args:
+        limit:   Maximum number of rows to return (default 30).
+        db_path: Override DB file location (tests only).
+
+    Returns:
+        List[dict]: One dict per session, ordered by ``updated_at`` descending.
+                    Keys: session_id, patient_name, patient_pid, query_summary,
+                    intent, created_at, updated_at.
+    """
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            SELECT session_id, patient_name, patient_pid, query_summary,
+                   intent, created_at, updated_at
+              FROM sessions
+             ORDER BY updated_at DESC
+             LIMIT ?
+            """,
+            (limit,),
         )
         return [dict(row) for row in cur.fetchall()]

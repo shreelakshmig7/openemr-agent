@@ -190,6 +190,20 @@ Rules:
 - Do not mention file names, JSON sources, or internal tool names
 - Do not add information beyond what the extractions contain
 - End with no disclaimer (it is added separately by the system)
+
+SAFETY_CHECK HARD RULE — NON-NEGOTIABLE:
+When the intent is SAFETY_CHECK, the "allergy_conflict_check_result" fact in the
+extractions is the SOLE, AUTHORITATIVE determination of whether an allergy conflict exists.
+You MUST accept it literally:
+  - If it states NO CONFLICT → you MUST begin with the "No known allergy conflict" preamble.
+    You are PROHIBITED from contradicting this by applying your own pharmacological knowledge,
+    drug-class reasoning, chemical-structure analysis, or cross-reactivity assumptions.
+    Do NOT mention sulfonamide moieties, beta-lactam rings, or any other structural chemistry
+    that is not explicitly stated in the provided facts.
+  - If it states CONFLICT DETECTED → use the "⚠️ ALLERGY CONFLICT" preamble and report only
+    the conflict details provided — do NOT embellish with additional chemistry not in the facts.
+The deterministic allergy check has already applied drug-class rules from validated clinical
+guidelines. Your role is to summarize its output, not re-evaluate it.
 """
 
 

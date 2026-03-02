@@ -446,12 +446,17 @@ def run_eval(
             # any clarification-node paths where final_response is not set.
             response_text = result.get("final_response") or result.get("clarification_needed", "")
             confidence = float(result.get("confidence_score", 0.0))
-            escalate = should_escalate_to_human(confidence_score=confidence).get("escalate", True)
             denial_risk_level = (
                 result.get("denial_risk", {}).get("risk_level")
                 if result.get("denial_risk")
                 else None
             )
+            # Escalate on low confidence OR on HIGH/CRITICAL denial risk:
+            # a confirmed CONTRAINDICATED finding or critical documentation gap
+            # always requires physician review regardless of confidence score.
+            confidence_escalate = should_escalate_to_human(confidence_score=confidence).get("escalate", True)
+            risk_escalate = denial_risk_level in ("HIGH", "CRITICAL")
+            escalate = confidence_escalate or risk_escalate
         except Exception as e:
             response_text = f"Agent error: {str(e)}"
             confidence = 0.0

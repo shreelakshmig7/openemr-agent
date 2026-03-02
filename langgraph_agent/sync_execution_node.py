@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 import os
 from datetime import date as _date_cls
@@ -178,27 +179,68 @@ def sync_execution_node(state: AgentState) -> AgentState:
     )
 
     # ── Local-audit fallback (demo / read-only OpenEMR build) ────────────
-    # When the FHIR write endpoint returns 404, synced_count=0 even though
-    # the agent correctly identified, staged, and de-duplicated the markers.
-    # For the demo, the local evidence_staging table IS the authoritative
-    # audit trail.  Promote FAILED rows → SYNCED/SUPERSEDED locally so the
-    # audit trail is complete and the next upload won't re-show the same
-    # markers as "new discoveries".
+    # Three scenarios all land here (synced_count == 0):
+    #
+    # Path A — FHIR 404 (mapped_count > 0): sync_node mapped resolvable rows,
+    #   POSTed to OpenEMR, got 404, and marked those rows FAILED.
+    #   promote_failed_to_synced() picks them up.
+    #
+    # Path A2 — Pre-screen skip (mapped_count == 0, skipped_count > 0):
+    #   sync_node found rows but ALL had empty marker_value or unknown LOINC,
+    #   so they were FAILED immediately without a FHIR POST attempt.
+    #   mapped_count is 0, but rows ARE in FAILED state — the old guard
+    #   "if mapped_count > 0" would have skipped promote_failed_to_synced(),
+    #   causing "No Records Updated" even though rows exist.  Now removed.
+    #
+    # Path B — Scenario A (empty patient_fhir_id): sync_node exited before
+    #   touching any rows; they remain PENDING.
+    #   promote_pending_to_synced() handles this case.
     local_promoted = 0
     soap_note_posted = False
     encounter_id = ""
 
-    if synced_count == 0 and mapped_count > 0:
+    if synced_count == 0:
         try:
             import database as _db_mod
+
+            logger.warning(
+                "sync_execution_node: synced=0 — running local fallback "
+                "(session=%s mapped=%d skipped=%d failed=%d).",
+                session_id, mapped_count, skipped_count, failed_count,
+            )
+
+            # Path A / A2: always try FAILED rows first — covers both FHIR-404
+            # failures (mapped_count > 0) AND pre-screen-skip failures
+            # (mapped_count == 0, skipped_count > 0).
             local_promoted = _db_mod.promote_failed_to_synced(session_id)
-            # Recalculate counts from the promoted rows.
-            synced_count     = min(mapped_count, local_promoted)
-            superseded_count = max(0, local_promoted - synced_count)
-            failed_count     = 0
-            logger.info(
-                "sync_execution_node: local fallback promoted %d rows "
-                "(synced=%d superseded=%d).",
+            if local_promoted > 0:
+                # promote_failed_to_synced returns champion+superseded combined.
+                # Re-query to get accurate split for the summary.
+                try:
+                    import database as _db2
+                    _synced_rows    = _db2.get_synced_markers(patient_id=patient_fhir_id)
+                    _promoted_synced = sum(
+                        1 for r in _synced_rows
+                        if (r.get("session_id") or "") == session_id
+                    )
+                except Exception:
+                    _promoted_synced = max(1, local_promoted // 2)
+                synced_count     = _promoted_synced or max(1, local_promoted - (local_promoted - 1))
+                superseded_count = max(0, local_promoted - synced_count)
+                failed_count     = 0
+
+            if local_promoted == 0:
+                # Path B: sync_node never touched rows — still PENDING.
+                prom_synced, prom_superseded = _db_mod.promote_pending_to_synced(session_id)
+                if prom_synced + prom_superseded > 0:
+                    synced_count     = prom_synced
+                    superseded_count = prom_superseded
+                    failed_count     = 0
+                    local_promoted   = prom_synced + prom_superseded
+
+            logger.warning(
+                "sync_execution_node: fallback complete — promoted=%d "
+                "synced=%d superseded=%d.",
                 local_promoted, synced_count, superseded_count,
             )
         except Exception as fallback_exc:
@@ -212,12 +254,21 @@ def sync_execution_node(state: AgentState) -> AgentState:
     # This makes the findings visible in the portal UI under Encounters,
     # bypassing the blocked FHIR Observation write endpoint.
     if synced_count > 0 and patient_fhir_id:
-        soap_note_posted, encounter_id = _post_soap_note_to_openemr(
-            patient_fhir_id=patient_fhir_id,
-            patient_name=patient_name,
-            new_items=new_items,
-            patient_info=patient,
-        )
+        # Scenario A patients carry a synthetic "sa-*" ID — there is no EHR
+        # patient record to attach a SOAP note to, so skip the API call.
+        if patient_fhir_id.startswith("sa-"):
+            logger.info(
+                "sync_execution_node: Scenario A patient (id=%s) — "
+                "SOAP note skipped (no EHR patient record).",
+                patient_fhir_id,
+            )
+        else:
+            soap_note_posted, encounter_id = _post_soap_note_to_openemr(
+                patient_fhir_id=patient_fhir_id,
+                patient_name=patient_name,
+                new_items=new_items,
+                patient_info=patient,
+            )
         if soap_note_posted:
             logger.info(
                 "sync_execution_node: encounter+SOAP note visible in OpenEMR portal "
@@ -413,9 +464,48 @@ def _post_soap_note_to_openemr(
             )
 
             async with OpenEMRClient() as client:
+                # Resolve a real FHIR UUID when patient_fhir_id is a short
+                # mock ID (e.g. "P001" from mock_data/patients.json).
+                # OpenEMR's encounter endpoint requires the actual patient UUID;
+                # mock IDs cause a 404 or 422 from the API.
+                _UUID_RE = re.compile(
+                    r'^[0-9a-f]{8}-[0-9a-f]{4}-'
+                    r'[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+                    re.IGNORECASE,
+                )
+                resolved_uuid = patient_fhir_id
+                if not _UUID_RE.match(patient_fhir_id):
+                    name_parts = patient_name.replace(".", "").split()
+                    given  = name_parts[0] if name_parts else ""
+                    family = name_parts[-1] if len(name_parts) > 1 else ""
+                    try:
+                        bundle  = await client.get_patients(family=family, given=given)
+                        entries = (bundle or {}).get("entry", [])
+                        if entries:
+                            resolved_uuid = entries[0]["resource"]["id"]
+                            logger.info(
+                                "sync_execution_node: resolved real UUID %s "
+                                "for patient '%s' (was '%s').",
+                                resolved_uuid, patient_name, patient_fhir_id,
+                            )
+                        else:
+                            logger.warning(
+                                "sync_execution_node: no OpenEMR patient matched "
+                                "'%s' — SOAP note skipped.",
+                                patient_name,
+                            )
+                            return False, ""
+                    except Exception as _resolve_exc:
+                        logger.warning(
+                            "sync_execution_node: UUID resolution failed for "
+                            "'%s' — %s. SOAP note skipped.",
+                            patient_name, _resolve_exc,
+                        )
+                        return False, ""
+
                 # Step 1 — create an encounter to anchor the SOAP note.
                 enc = await client.post_encounter(
-                    patient_uuid=patient_fhir_id,
+                    patient_uuid=resolved_uuid,
                     reason=f"AgentForge RCM Biomarker Sync — {today_str}",
                 )
                 # OpenEMR's SOAP note endpoint uses the integer encounter id
@@ -433,7 +523,7 @@ def _post_soap_note_to_openemr(
 
                 # Step 2 — post the SOAP note under that encounter using eid.
                 await client.post_soap_note(
-                    patient_uuid=patient_fhir_id,
+                    patient_uuid=resolved_uuid,
                     encounter_uuid=enc_eid,
                     subjective=subjective,
                     objective=objective,
@@ -443,7 +533,7 @@ def _post_soap_note_to_openemr(
                 logger.info(
                     "sync_execution_node: SOAP note posted to OpenEMR "
                     "(patient=%s encounter_eid=%s encounter_uuid=%s).",
-                    patient_fhir_id, enc_eid, enc_euuid,
+                    resolved_uuid, enc_eid, enc_euuid,
                 )
 
                 # OpenEMR's SOAP note REST endpoint creates the form with

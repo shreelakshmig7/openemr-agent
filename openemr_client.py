@@ -126,7 +126,7 @@ class OpenEMRClient:
         self,
         base_url: Optional[str] = None,
         username: str = "admin",
-        password: str = "pass",
+        password: Optional[str] = None,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
         site: str = "default",
@@ -136,8 +136,8 @@ class OpenEMRClient:
             base_url
             or os.getenv("OPENEMR_BASE_URL", "https://localhost:9300")
         ).rstrip("/")
-        self.username = username
-        self.password = password
+        self.username = os.getenv("OPENEMR_USERNAME", username)
+        self.password = password or os.getenv("OPENEMR_PASSWORD", "pass")
         self.site = site
         self.timeout = timeout
 

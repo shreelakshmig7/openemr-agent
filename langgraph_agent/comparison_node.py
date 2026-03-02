@@ -48,6 +48,7 @@ Project: AgentForge — Healthcare RCM AI Agent
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 import os
@@ -358,6 +359,21 @@ def comparison_node(state: AgentState) -> AgentState:
     patient          = state.get("extracted_patient") or {}
     patient_id       = patient.get("id", "") or patient.get("fhir_id", "")
     patient_name     = patient.get("name", "this patient")
+
+    # Scenario A guard: patient not found in EHR → extracted_patient is empty,
+    # so patient_id = "".  Empty string is falsy and would be silently dropped
+    # by the _cache_fields carry-forward in run_workflow, making
+    # staged_patient_fhir_id="" in the "yes" turn and causing sync_node to
+    # exit immediately with mapped_count=0.  Generate a stable session-scoped
+    # synthetic ID so the field survives the carry-forward and sync can proceed
+    # to the local-audit fallback path.
+    if not patient_id and session_id:
+        patient_id = "sa-" + hashlib.md5(session_id.encode()).hexdigest()[:16]
+        logger.info(
+            "comparison_node: Scenario A — EHR patient not found; "
+            "synthetic staged_patient_fhir_id generated (session=%s id=%s).",
+            session_id, patient_id,
+        )
     allergy_conflict = state.get("allergy_conflict_result") or {}
     denial_risk      = state.get("denial_risk") or {}
 

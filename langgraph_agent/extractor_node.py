@@ -24,7 +24,7 @@ Key functions:
         or runs Step 0 (legacy), then calls tools in sequence.
     _extract_patient_identifier_llm: Step 0 — Haiku returns JSON (type, value, ambiguous).
         Only called when orchestrator_ran=False.
-    _stub_pii_scrubber: Strips HIPAA fields from text before LLM/tool calls.
+    scrub_pii: Strips HIPAA PII from text before any LLM/tool call (Presidio-based).
     _format_extractions: Converts tool results to cited extraction dicts.
 
 Author: Shreelakshmi Gopinatha Rao
@@ -379,39 +379,9 @@ def _extract_patient_identifier_llm(query: str) -> Dict[str, Any]:
         return {"type": "none", "ambiguous": True, "reason": "extraction failed"}
 
 
-# ── PII Scrubber Stub ─────────────────────────────────────────────────────────
+# ── PII Scrubber ──────────────────────────────────────────────────────────────
 
-# TODO: Replace with Microsoft Presidio in PII infrastructure PR
-_SSN_PATTERN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-_MRN_PATTERN = re.compile(r"\bMRN[:\s]*\w+\b", re.IGNORECASE)
-_DOB_PATTERN = re.compile(r"\b(DOB|Date of Birth)[:\s]*[\d/\-]+\b", re.IGNORECASE)
-_PHONE_PATTERN = re.compile(r"\b\d{3}[.\-]\d{3}[.\-]\d{4}\b")
-_EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b")
-
-
-def _stub_pii_scrubber(text: str) -> str:
-    """
-    Remove HIPAA-defined PII patterns from text before any tool or LLM call.
-    Strips SSN, MRN, DOB, phone, and email patterns using regex.
-
-    Args:
-        text: Raw input text that may contain PII.
-
-    Returns:
-        str: Text with PII patterns replaced by [REDACTED].
-
-    Raises:
-        Never — returns original text unchanged if scrubbing fails.
-    """
-    try:
-        text = _SSN_PATTERN.sub("[REDACTED-SSN]", text)
-        text = _MRN_PATTERN.sub("[REDACTED-MRN]", text)
-        text = _DOB_PATTERN.sub("[REDACTED-DOB]", text)
-        text = _PHONE_PATTERN.sub("[REDACTED-PHONE]", text)
-        text = _EMAIL_PATTERN.sub("[REDACTED-EMAIL]", text)
-        return text
-    except Exception:
-        return text
+from tools.pii_scrubber import scrub_pii as _scrub_pii
 
 
 # ── Extraction formatter ──────────────────────────────────────────────────────
@@ -562,10 +532,10 @@ def extractor_node(state: AgentState) -> AgentState:
         Never — errors are written to state['error'] and returned as partial extractions.
     """
     try:
-        clean_query = _stub_pii_scrubber(state["input_query"])
+        clean_query = _scrub_pii(state["input_query"])
 
         if state.get("clarification_response"):
-            clean_query = f"{clean_query} {_stub_pii_scrubber(state['clarification_response'])}"
+            clean_query = f"{clean_query} {_scrub_pii(state['clarification_response'])}"
 
         tool_trace = list(state.get("tool_trace") or [])
         tool_call_history = list(state.get("tool_call_history") or [])
@@ -812,8 +782,12 @@ def extractor_node(state: AgentState) -> AgentState:
         if patient is None and ehr_gap_extractions:
             all_extractions = ehr_gap_extractions + all_extractions
 
-        # If a drug-class or exact allergy conflict was found, inject an explicit extraction
-        # so the denial_analyzer keyword match ("allergy conflict") fires correctly.
+        # Always inject the allergy check result as an explicit grounding fact so the
+        # synthesis LLM has an authoritative anchor regardless of the outcome.
+        # Conflict=True: fires the CONFLICT DETECTED path + denial_analyzer keyword match.
+        # Conflict=False: gives the LLM an explicit "no conflict" statement to quote,
+        # preventing it from filling the silence with its own pharmacological reasoning
+        # (the root cause of the Fenofibrate/sulfa hallucination).
         if allergy_conflict_result.get("conflict"):
             conflict_drug = allergy_conflict_result.get("drug", proposed_drug)
             conflict_allergy = allergy_conflict_result.get("allergy", "documented allergy")
@@ -834,6 +808,30 @@ def extractor_node(state: AgentState) -> AgentState:
                 conflict_drug,
                 conflict_allergy,
                 conflict_type,
+            )
+        elif proposed_drug:
+            # Inject a grounding fact when the check returns NO conflict.
+            # The synthesis prompt's SAFETY_CHECK HARD RULE requires this fact to be
+            # present so the LLM can cite it directly instead of reasoning from scratch.
+            all_extractions.append({
+                "claim": (
+                    f"allergy_conflict_check_result: NO CONFLICT — {proposed_drug} does not "
+                    f"match any of the patient's documented allergies "
+                    f"({allergy_conflict_result.get('source_citation', '')}). "
+                    f"This is the authoritative allergy check result from validated drug-class "
+                    f"guidelines. Do NOT add drug-chemistry reasoning beyond this result."
+                ),
+                "citation": allergy_conflict_result.get(
+                    "source_citation",
+                    f"Allergy check: no conflict found for {proposed_drug}.",
+                ),
+                "source": "mock_data/patients.json",
+                "verbatim": True,
+                "synthetic": True,
+            })
+            logger.info(
+                "SAFETY_CHECK no-conflict grounding fact injected for drug '%s'.",
+                proposed_drug,
             )
 
         documents_processed = [
@@ -902,7 +900,9 @@ def extractor_node(state: AgentState) -> AgentState:
                     for pdf_ext in pdf_result.get("extractions", []):
                         page_num = pdf_ext.get("page_number") or 0
                         page_key = str(page_num)
-                        verbatim = pdf_ext.get("verbatim_quote", "")
+                        # Scrub PII before the text enters extractions or the
+                        # cache — checkpoints must store scrubbed data only.
+                        verbatim = _scrub_pii(pdf_ext.get("verbatim_quote", ""))
                         new_pages.setdefault(page_key, []).append(verbatim)
                         all_extractions.append({
                             "kind":         "pdf_content",

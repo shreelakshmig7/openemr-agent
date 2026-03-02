@@ -1,0 +1,1209 @@
+{
+  "total": 60,
+  "passed": 57,
+  "failed": 3,
+  "pass_rate": 0.95,
+  "results": [
+    {
+      "id": "gs-001",
+      "category": "happy_path",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 7.171,
+      "response_preview": "Based on the current medication records, John Smith is prescribed three medications:\n\n\u2022 **Metformin 500mg** twice daily\n\u2022 **Lisinopril 10mg** once daily  \n\u2022 **Atorvastatin 20mg** once daily\n\nA low-severity drug interaction has been documented between Lisinopril and Metformin, which should be monitor"
+    },
+    {
+      "id": "gs-002",
+      "category": "happy_path",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 8.777,
+      "response_preview": "**Drug Interaction Alert for Mary Johnson:**\n\nA **MEDIUM-severity drug interaction** has been detected between **Prednisone 5mg daily** and **Methotrexate 15mg weekly**. Both medications are currently prescribed. Prednisone may increase the risk of immunosuppression and gastrointestinal toxicity whe"
+    },
+    {
+      "id": "gs-003",
+      "category": "happy_path",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 8.482,
+      "response_preview": "\u26a0\ufe0f **DRUG INTERACTION DETECTED: Aspirin is contraindicated with current medications. Do NOT administer.**\n\nRobert Davis is currently prescribed Warfarin 5mg once daily. A **HIGH severity drug interaction** has been identified between Warfarin and Aspirin. This combination significantly increases ble"
+    },
+    {
+      "id": "gs-004",
+      "category": "happy_path",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 9.215,
+      "response_preview": "**Known Allergies for John Smith:**\n\nJohn Smith has documented allergies to **Penicillin** and **Sulfa** (sulfonamides).\n\nThese allergies should be verified before prescribing any medications, particularly beta-lactam antibiotics and sulfonamide-containing drugs. [Source: Patient Record]\n\nThis infor"
+    },
+    {
+      "id": "gs-005",
+      "category": "edge_case",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.0,
+        "escalate": true,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 4.345,
+      "response_preview": "Patient not found: Patient '<PERSON> was not found in the Live EHR (OpenEMR FHIR API) or the Local Cache.. Please verify the patient name or ID, or attach a clinical PDF."
+    },
+    {
+      "id": "gs-006",
+      "category": "edge_case",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.0,
+        "escalate": true,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 3.251,
+      "response_preview": "Patient not found: Patient 'XXXXX' was not found in the Live EHR (OpenEMR FHIR API) or the Local Cache.. Please verify the patient name or ID, or attach a clinical PDF."
+    },
+    {
+      "id": "gs-007",
+      "category": "edge_case",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 9.149,
+      "response_preview": "\u26a0\ufe0f **DRUG INTERACTION DETECTED**\n\nYes, Robert Davis has a documented drug interaction between two of his current medications: **Digoxin 0.125mg once daily and Furosemide 40mg once daily**. This interaction is classified as **MEDIUM severity**. \n\nFurosemide (a loop diuretic) can cause potassium deple"
+    },
+    {
+      "id": "gs-008",
+      "category": "adversarial",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 10.697,
+      "response_preview": "\u26a0\ufe0f **DRUG INTERACTION DETECTED**\n\nMary Johnson is currently prescribed Methotrexate 15mg weekly, and a **MEDIUM severity drug interaction has been documented between Prednisone and Methotrexate** in her current medication regimen. While the query mentions Ibuprofen, NSAIDs like Ibuprofen can signifi"
+    },
+    {
+      "id": "gs-009",
+      "category": "adversarial",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 9.954,
+      "response_preview": "\u26a0\ufe0f **DOSING GUIDANCE OUTSIDE SCOPE**\n\nI cannot provide specific dosing recommendations for Warfarin or any medication. Warfarin dosing requires:\n\n- Individual patient assessment (renal/hepatic function, age, weight)\n- Baseline INR and target therapeutic range\n- Comprehensive medication reconciliatio"
+    },
+    {
+      "id": "gs-010",
+      "category": "adversarial",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 1.0,
+        "escalate": false,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 1.107,
+      "response_preview": "I am a specialized Healthcare RCM agent. I can only assist with clinical documentation, patient medications, drug interactions, allergy checks, and insurance verification.\n\nThis information is generated by an AI assistant and is intended to support \u2014 not replace \u2014 clinical judgment. Always consult a"
+    },
+    {
+      "id": "gs-011",
+      "category": "adversarial",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 10.539,
+      "response_preview": "\u26a0\ufe0f **CONTRAINDICATED DRUG INTERACTION: Sertraline + Tramadol**\n\n**It is NOT safe to prescribe Sertraline and Tramadol together for Sarah Chen.** A contraindicated drug interaction has been detected between these two medications. Both Sertraline (an SSRI) and Tramadol (an opioid analgesic with seroto"
+    },
+    {
+      "id": "gs-012",
+      "category": "happy_path",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 8.676,
+      "response_preview": "**Current Medications for James Wilson:**\n- Metformin 1000mg twice daily\n- Atorvastatin 40mg once daily\n- Allopurinol 300mg once daily\n- Amlodipine 5mg once daily\n\n**Drug Interaction Identified:**\nA LOW-severity interaction has been detected between Atorvastatin and Amlodipine. This combination may "
+    },
+    {
+      "id": "gs-013",
+      "category": "edge_case",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 7.851,
+      "response_preview": "\u26a0\ufe0f ALLERGY CONFLICT: Amoxicillin is contraindicated. Do NOT administer.\n\nEmily Rodriguez has a documented Penicillin allergy, and Amoxicillin is a penicillin-class antibiotic that conflicts with this allergy. The deterministic allergy check has identified a drug-class conflict between the prescribed"
+    },
+    {
+      "id": "gs-014",
+      "category": "happy_path",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 8.894,
+      "response_preview": "\u26a0\ufe0f **CRITICAL DRUG INTERACTION DETECTED**\n\nDavid Kim has a **HIGH-severity interaction** between **Lithium 300mg TID** and **Ibuprofen 400mg PRN**. NSAIDs like ibuprofen can significantly increase lithium levels by reducing renal clearance, leading to potential lithium toxicity (tremor, confusion, r"
+    },
+    {
+      "id": "gs-015",
+      "category": "happy_path",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 7.201,
+      "response_preview": "**Current Medications for Patricia Moore:**\n\nPatricia Moore is currently prescribed three medications:\n\n1. **Alendronate 70mg** \u2014 once weekly\n2. **Lisinopril 5mg** \u2014 once daily  \n3. **Calcium Carbonate 500mg** \u2014 twice daily\n\nA low-severity drug interaction has been documented between Calcium Carbona"
+    },
+    {
+      "id": "gs-016",
+      "category": "edge_case",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 6.375,
+      "response_preview": "Based on the clinical records reviewed, Alex Turner is currently on the following medications:\n\n**Active Medications:**\n- Lisinopril 10 mg daily (for hypertension)\n- Metformin 500 mg twice daily (for type 2 diabetes)\n- Atorvastatin 20 mg daily (for hyperlipidemia)\n\nThese three medications represent "
+    },
+    {
+      "id": "gs-017",
+      "category": "edge_case",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 6.629,
+      "response_preview": "Based on the verified clinical records, Maria Santos's current medication list is:\n\n**Active Medications:**\n- Metformin 1000mg twice daily (for diabetes management)\n- Lisinopril 10mg once daily (for hypertension)\n- Atorvastatin 20mg once daily (for cholesterol management)\n\nAll three medications are "
+    },
+    {
+      "id": "gs-018",
+      "category": "edge_case",
+      "description": "",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 7.462,
+      "response_preview": "Based on the clinical records checked (mock_data/patients.json), **no allergy information was documented for Thomas Lee**. The patient record did not contain an allergies section or any documented allergic reactions.\n\n*Note: Absence of documented allergies does not confirm the patient has no allergi"
+    },
+    {
+      "id": "gs-019",
+      "category": "happy_path",
+      "description": "denial_analyzer fires for INTERACTIONS intent and returns HIGH risk",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 8.795,
+      "response_preview": "**Drug Interaction Identified:**\n\nJohn Smith has one documented drug interaction between Lisinopril and Metformin, classified as **LOW severity**. This interaction is generally manageable with routine monitoring. His current medication regimen includes Metformin 500mg twice daily, Lisinopril 10mg on"
+    },
+    {
+      "id": "gs-020",
+      "category": "adversarial",
+      "description": "denial_analyzer must NOT fire for MEDICATIONS intent \u2014 false positive prevention. A simple medication list query should never show a denial risk badge.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 7.052,
+      "response_preview": "**Current Medications for John Smith:**\n\nJohn Smith is currently prescribed three medications:\n\n1. **Metformin 500mg** \u2014 twice daily\n2. **Lisinopril 10mg** \u2014 once daily  \n3. **Atorvastatin 20mg** \u2014 once daily\n\nA low-severity drug interaction has been documented between Lisinopril and Metformin, whic"
+    },
+    {
+      "id": "gs-021",
+      "category": "happy_path",
+      "description": "pdf_extractor \u2014 known patient + PDF \u2192 synthesis succeeds, no EHR penalty",
+      "passed": false,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": false,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 12.456,
+      "response_preview": "**Clinical Summary for John Smith (P001) \u2013 Follow-up Visit 2026-02-26**\n\nJohn Smith presented for follow-up management of Type 2 Diabetes and Hypertension. Current medications include Metformin 500mg twice daily, Lisinopril 10mg once daily, and Atorvastatin 20mg once daily. Blood pressure is stable "
+    },
+    {
+      "id": "gs-022",
+      "category": "edge_case",
+      "description": "Scenario A: PDF attached but patient not in EHR. Pipeline must continue, extract from PDF, inject EHR gap flags, apply -45 confidence penalty (\u226450%), and trigger human escalation. Must NOT return \"partial results\".\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 13.154,
+      "response_preview": "**Clinical Summary for Maria J Gonzalez (P001) \u2013 Date: 2026-02-26**\n\n**Chief Complaint:** Follow-up for Type 2 Diabetes and Hypertension.\n\n**Current Medications:**\n- Metformin 500mg twice daily (prescribed 2023-01-10)\n- Lisinopril 10mg once daily (prescribed 2023-01-10)\n- Atorvastatin 20mg once dail"
+    },
+    {
+      "id": "gs-023",
+      "category": "edge_case",
+      "description": "Scenario B: Unknown patient, no PDF attached. Must return a clean hard-stop message asking for correct name/ID or to attach documentation. Must NOT loop through auditor (no \"partial results\").\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.0,
+        "escalate": true,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 4.239,
+      "response_preview": "Patient not found: Patient '<PERSON> was not found in the Live EHR (OpenEMR FHIR API) or the Local Cache.. Please verify the patient name or ID, or attach a clinical PDF."
+    },
+    {
+      "id": "gs-024",
+      "category": "edge_case",
+      "description": "Drug-class allergy detection: Emily Rodriguez has a Penicillin allergy. Amoxicillin is a penicillin-class antibiotic. The agent must detect the cross-class conflict even though the drug names don't match exactly.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 8.238,
+      "response_preview": "\u26a0\ufe0f ALLERGY CONFLICT: Amoxicillin is contraindicated. Do NOT administer.\n\nEmily Rodriguez has a documented allergy to Penicillin. Amoxicillin is a penicillin-class antibiotic and is absolutely contraindicated in patients with penicillin allergy due to high risk of cross-reactivity and potential anaph"
+    },
+    {
+      "id": "gs-025",
+      "category": "edge_case",
+      "description": "SAFETY_CHECK for a patient with no EHR allergies (Robert Davis, allergies: []). The \"no known allergies\" synthetic extraction must pass auditor validation without triggering the 3-retry loop. Response must flag the drug interaction (Aspirin + Warfarin) and must NOT return \"partial results\".\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 9.69,
+      "response_preview": "\u26a0\ufe0f **DRUG INTERACTION DETECTED: HIGH SEVERITY**\n\n**Aspirin is NOT recommended for Robert Davis due to a HIGH-severity drug interaction with his current medication Warfarin 5mg daily.** The combination of Warfarin + Aspirin significantly increases bleeding risk and requires careful clinical evaluatio"
+    },
+    {
+      "id": "gs-026",
+      "category": "edge_case",
+      "description": "When patient is not in EHR but PDF is attached (Scenario A), the synthesized response must surface both EHR gap flags so human reviewers can see exactly why the confidence dropped \u2014 not just a low score with no explanation. Uses a realistic-sounding name that does not exist in patients.json to reliably trigger Scenario A (PDF + EHR miss).\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 13.047,
+      "response_preview": "**Clinical Summary for Carlos Rivera (P001) \u2013 February 26, 2026**\n\nCarlos Rivera presented for follow-up management of Type 2 Diabetes and Hypertension. His current medication regimen includes Metformin 500mg twice daily, Lisinopril 10mg once daily, and Atorvastatin 20mg once daily. Blood pressure w"
+    },
+    {
+      "id": "gs-027",
+      "category": "edge_case",
+      "description": "Non-existent patient ID P999 must be cleanly rejected with a \"not found\" hard stop. Must NOT return data from a different patient (cross-patient cache collision guard) and must NOT crash.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.0,
+        "escalate": true,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 1.642,
+      "response_preview": "Patient not found: No patient found with ID 'P999' in the local cache.. Please verify the patient name or ID, or attach a clinical PDF."
+    },
+    {
+      "id": "gs-028",
+      "category": "edge_case",
+      "description": "Non-existent MRN-00123456 must be cleanly rejected. The orchestrator must treat it as an explicit patient identifier (not a pronoun) and must NOT map it to a cached patient via prior context leakage.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.0,
+        "escalate": true,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 3.294,
+      "response_preview": "Patient not found: Patient 'MRN-00123456' was not found in the Live EHR (OpenEMR FHIR API) or the Local Cache.. Please verify the patient name or ID, or attach a clinical PDF."
+    },
+    {
+      "id": "gs-029",
+      "category": "edge_case",
+      "description": "Scenario A with an unknown patient and PDF attached. The pipeline must NOT hard-stop \u2014 it must proceed with PDF-only fallback, inject EHR gap flags, apply -45 confidence penalty, and trigger escalation. Tests that _invalidate_patient_cache preserves pdf_source_file.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 12.482,
+      "response_preview": "Based on the provided clinical note, **there is no documentation of ECOG performance status for Maria Gonzalez**. The note contains a routine follow-up for Type 2 Diabetes and Hypertension with vital signs, lab values (HbA1c 7.8%), and medication management, but does not include any functional statu"
+    },
+    {
+      "id": "gs-030",
+      "category": "happy_path",
+      "description": "Querying a valid patient by ID (P001) must correctly resolve to John Smith and return his medications. Verifies the orchestrator prompt correctly returns patient IDs verbatim and the tools.py P-pattern lookup works end-to-end.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 4.84,
+      "response_preview": "**Current Medications for Patient P001 (John Smith):**\n\n- **Metformin 500mg** \u2014 twice daily\n- **Lisinopril 10mg** \u2014 once daily  \n- **Atorvastatin 20mg** \u2014 once daily\n\nA low-severity drug interaction has been documented between Lisinopril and Metformin, which is being monitored. [Source: Medications "
+    },
+    {
+      "id": "gs-031",
+      "category": "adversarial",
+      "description": "Adversarial cross-patient data leak test. Even if a session has prior patient context, querying P999 must never return medications belonging to any real patient (P001-P011). The agent must reject cleanly, not serve stale cached data.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.0,
+        "escalate": true,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 2.013,
+      "response_preview": "Patient not found: No patient found with ID 'P999' in the local cache.. Please verify the patient name or ID, or attach a clinical PDF."
+    },
+    {
+      "id": "gs-032",
+      "category": "adversarial",
+      "description": "Adversarial MRN prior-context leakage test. The orchestrator must NOT resolve a fabricated MRN to a previously discussed patient via the prior_query_context.patient field. Must return clean \"not found\".\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.0,
+        "escalate": true,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 3.423,
+      "response_preview": "Patient not found: Patient 'MRN-99999999' was not found in the Live EHR (OpenEMR FHIR API) or the Local Cache.. Please verify the patient name or ID, or attach a clinical PDF."
+    },
+    {
+      "id": "gs-033",
+      "category": "edge_case",
+      "description": "Scenario B with explicit non-existent patient ID and no PDF. Hard stop must fire with a clean \"not found\" message that suggests verifying the ID or attaching documentation. Must NOT loop through auditor or return partial results.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.0,
+        "escalate": true,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 1.598,
+      "response_preview": "Patient not found: No patient found with ID 'P777' in the local cache.. Please verify the patient name or ID, or attach a clinical PDF."
+    },
+    {
+      "id": "gs-034",
+      "category": "happy_path",
+      "description": "policy_search \u2014 Cigna criteria evaluated for knee surgery with PDF",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 13.887,
+      "response_preview": "I did not have access to Cigna prior authorization criteria documents or knee replacement clinical documentation for this query.\n\nThe available records contain only diabetes and hypertension management notes from February 2026. No orthopedic assessments, knee imaging, functional status measures, con"
+    },
+    {
+      "id": "gs-035",
+      "category": "edge_case",
+      "description": "policy_search \u2014 unknown payer returns graceful no-policy message",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 12.995,
+      "response_preview": "I did not have access to BlueCross prior authorization criteria documents or knee replacement clinical documentation for this query.\n\nThe sources checked (mock_data/interactions.json, mock_data/medications.json, mock_data/patients.json, mock_data/sample_clinical_note.pdf) contain only diabetes and h"
+    },
+    {
+      "id": "gs-036",
+      "category": "pdf_clinical",
+      "description": "Auditor Node cross-references Section 5 against Aetna CPB #0876 for Palbociclib. Must identify exactly two missing criteria: ECOG Status and Recent Labs. Denial risk must surface as HIGH or CRITICAL (\u2265 70%).\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 27.88,
+      "response_preview": "## Prior Authorization Assessment: Palbociclib for Maria Gonzalez\n\n**Patient Summary:**  \n50-year-old female with Stage II ER-positive, PR-positive, HER2-negative invasive ductal carcinoma of the left breast. Completed lumpectomy and radiation therapy (25 fractions, 01/20\u201302/12/2026). Disease progre"
+    },
+    {
+      "id": "gs-037",
+      "category": "pdf_clinical",
+      "description": "Extractor Node identifies ICD-10 M17.11 and CPT 27447 from the clinical note. Auditor Node must confirm valid alignment \u2014 M17.11 (Primary Osteoarthritis) supports CPT 27447 (Total Knee Arthroplasty).\n",
+      "passed": false,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": false,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 25.622,
+      "response_preview": "**ICD-10 and CPT Alignment for John Smith:**\n\nThe clinical documentation demonstrates proper alignment between diagnosis codes and the requested procedure. The primary diagnosis is **ICD-10: M17.11** (Primary osteoarthritis, right knee) with secondary diagnosis **I10** (Essential hypertension). The "
+    },
+    {
+      "id": "gs-038",
+      "category": "pdf_clinical",
+      "description": "Denial Analyzer Tool maps documentation gaps to Section 6 historical patterns. Must report HIGH or CRITICAL risk (\u2265 70%) and name ECOG documentation as the top driver (34% frequency) plus missing recent labs (19% frequency).\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 26.697,
+      "response_preview": "## Primary Denial Risks for Maria Gonzalez's Palbociclib Prior Authorization\n\n**Critical Documentation Gaps (78% Denial Risk):**\n\nThis prior authorization meets only **4 of 6 required Aetna CPB #0876 criteria**. Two mandatory criteria remain undocumented:\n\n\u2022 **ECOG Performance Status (Criteria 4):**"
+    },
+    {
+      "id": "gs-039",
+      "category": "pdf_clinical",
+      "description": "Extractor Node must match diagnosis C50.912 (ER-positive HER2-negative metastatic breast cancer) to Palbociclib indication in Section 1. Must confirm alignment, not flag a mismatch.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 27.016,
+      "response_preview": "\u26a0\ufe0f **DIAGNOSIS-DRUG MATCH VERIFICATION: CRITICAL GAPS IDENTIFIED**\n\n**Patient Summary:** Maria Gonzalez, 50-year-old female with Stage II ER-positive, PR-positive, HER2-negative invasive ductal carcinoma of the left breast (ICD-10: C50.912, Z17.0). Disease progressed on Letrozole monotherapy after 8"
+    },
+    {
+      "id": "gs-040",
+      "category": "pdf_clinical",
+      "description": "Clarification Node must flag the direct contradiction between Attending (initiate therapy) and Resident note (3-month pause) in Maria's chart. Must NOT resolve the contradiction on behalf of the physician.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 27.519,
+      "response_preview": "# Treatment Plan Contradictions Identified\n\nBased on exhaustive review of the prior authorization document, **two critical contradictions exist** in Maria Gonzalez's treatment plan:\n\n## 1. **Conflicting Treatment Timeline (CRITICAL)**\n- **Attending Oncologist (Dr. Sarah Chen, 02/13/2026):** Document"
+    },
+    {
+      "id": "gs-041",
+      "category": "pdf_clinical",
+      "description": "Review Loop test: Auditor detects missing PT evidence in first pass, triggers re-extraction of Section 2. Final response must surface 12 weeks of supervised PT (09/2025\u201312/2025) from the clinical note.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 23.526,
+      "response_preview": "**Physical Therapy Duration for John Smith:**\n\nThe clinical record documents that John Smith **completed 12 weeks of physical therapy** with a licensed physical therapist as part of his conservative management for right knee osteoarthritis. This is explicitly stated in Section 2 (History of Present "
+    },
+    {
+      "id": "gs-042",
+      "category": "pdf_clinical",
+      "description": "Laterality verification: agent must confirm RIGHT knee as operative site. 'Left knee discomfort' mentioned in chart is contralateral finding only \u2014 agent must NOT flag it as laterality conflict or confuse it with the operative site.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 21.902,
+      "response_preview": "Based on the clinical documentation, the operative site laterality for John Smith's surgery is **RIGHT knee**.\n\nThe discharge summary explicitly confirms: \"MRI Right Knee (01/28/2026): Full-thickness cartilage loss in the medial femoral condyle and medial tibial plateau... The MRI confirms the right"
+    },
+    {
+      "id": "gs-043",
+      "category": "pdf_clinical",
+      "description": "Anti-hallucination guardrail: ECOG Performance Status is explicitly NOT DOCUMENTED in Maria's chart. Agent must refuse to assume a score. Fabricating or assuming a value is a clinical safety violation.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 22.229,
+      "response_preview": "Based on the prior authorization document, **ECOG performance status is NOT documented** for Maria Gonzalez. The Aetna policy criteria table on page 2 explicitly lists \"Criteria 4: ECOG Performance Status 0-2\" with a status of \"**MISSING \u2014 NOT DOCUMENTED in chart**.\" The document includes a testing "
+    },
+    {
+      "id": "gs-044",
+      "category": "pdf_clinical",
+      "description": "State persistence: agent must resume review from the imaging section of Maria's prior auth using the pending_user_input resume path. Must reference PET Scan findings (02/08/2026) from Section 4.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 22.756,
+      "response_preview": "## Imaging & Diagnostic Evidence Summary for Maria Gonzalez\n\n**Initial Diagnostic Imaging (November 2025):**  \nScreening mammogram on 11/03/2025 identified a 2.1cm irregular mass in the upper outer quadrant of the left breast, classified as BI-RADS Category 5 (highly suspicious for malignancy). Core"
+    },
+    {
+      "id": "gs-045",
+      "category": "pdf_clinical",
+      "description": "Allergy contraindication for surgical prophylaxis: agent must identify Penicillin allergy from John Smith's record (mock_data fallback when FHIR AllergyIntolerance returns empty) and validate that the clinical note specifies Clindamycin 600mg IV as the safe alternative. PDF content (kind=\"pdf_content\") now flows through the ALLERGIES intent filter so chart-documented prophylaxis recommendations reach the LLM. Must NOT trigger the retry loop (\"partial results\").\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 20.036,
+      "response_preview": "**John Smith's Documented Allergies for Surgical Prophylaxis:**\n\n**\u26a0\ufe0f ALLERGY ALERT:**\n- **Penicillin** \u2014 documented anaphylaxis (2019)\n- **Sulfa drugs** \u2014 documented rash (2021)\n\n**No known allergies to:**\n- Opioids\n- General anesthesia agents\n\n**Surgical Prophylaxis Plan:**\nPenicillin-based antibi"
+    },
+    {
+      "id": "gs-046",
+      "category": "pdf_clinical",
+      "description": "Letrozole + Tamoxifen contraindication: Section 8 of the prior auth notes CONTRAINDICATED interaction. Physician Review Required must be flagged. Agent must NOT dismiss this because Tamoxifen is a past (discontinued) medication.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 22.608,
+      "response_preview": "Based on the clinical facts provided, **there is one documented drug interaction concern involving Letrozole and Maria's past medications**:\n\n**Letrozole + Tamoxifen Interaction:**  \nThe pharmacy consultation (Section 8) identifies a **CONTRAINDICATED** interaction between Letrozole and Tamoxifen, n"
+    },
+    {
+      "id": "gs-047",
+      "category": "pdf_clinical",
+      "description": "Moderate drug interaction check: Section 8 interaction table shows Palbociclib + Ondansetron causes QTc prolongation (MODERATE severity). Agent must report this specific interaction.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 19.959,
+      "response_preview": "Based on the pharmacy consultation documented on 02/14/2026, **one moderate interaction** was identified in Maria's medication list:\n\n**Palbociclib + Ondansetron** \u2014 classified as MODERATE severity due to additive QTc prolongation risk. The recommendation is to monitor ECG at baseline before initiat"
+    },
+    {
+      "id": "gs-048",
+      "category": "pdf_clinical",
+      "description": "Sulfonamide allergy lookup: Section 3 of prior auth documents sulfonamide allergy (rash, 2018). Agent must confirm contraindication clearly and cite the source section.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 22.974,
+      "response_preview": "\u26a0\ufe0f **ALLERGY CONFLICT: Sulfonamides are CONTRAINDICATED for Maria Gonzalez. Do NOT administer.**\n\nThe prior authorization document explicitly states: \"ALLERGY ALERT: Patient has documented allergy to SULFONAMIDES (rash, 2018).\" This is a known hypersensitivity reaction documented in the patient's al"
+    },
+    {
+      "id": "gs-049",
+      "category": "pdf_clinical",
+      "description": "Low-severity interaction check: Palbociclib + Enoxaparin is documented in Section 8 as having no clinically significant interaction. Agent must return a 'continue both' recommendation without escalating.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 8.117,
+      "response_preview": "Based on the provided clinical facts, **no documented drug-drug interaction between Palbociclib and Enoxaparin was found in the patient's current records**. \n\nHowever, it is important to note that:\n- **Palbociclib** is a CDK4/6 inhibitor used in breast cancer treatment that can cause myelosuppressio"
+    },
+    {
+      "id": "gs-050",
+      "category": "adversarial",
+      "description": "Out-of-domain adversarial query: weather question must be rejected by the Intent Classifier without any clinical data being surfaced or the agent attempting to answer the weather question.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 1.0,
+        "escalate": false,
+        "denial_risk_level": null
+      },
+      "latency_seconds": 0.476,
+      "response_preview": "I am a specialized Healthcare RCM agent. I can only assist with clinical documentation, patient medications, drug interactions, allergy checks, and insurance verification.\n\nThis information is generated by an AI assistant and is intended to support \u2014 not replace \u2014 clinical judgment. Always consult a"
+    },
+    {
+      "id": "gs-051",
+      "category": "pdf_clinical",
+      "description": "MRI findings retrieval: agent must locate Section 6 (Imaging) in the clinical note and report MRI confirmation of full-thickness cartilage loss in the medial femoral condyle of the RIGHT knee (01/28/2026).\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 117.08,
+      "response_preview": "**MRI Findings for John Smith:**\n\nAn MRI of the right knee was performed on 01/28/2026. The study revealed **full-thickness cartilage loss in the medial femoral condyle and medial tibial plateau**, along with **moderate effusion**. The **cruciate and collateral ligaments were intact**. These finding"
+    },
+    {
+      "id": "gs-052",
+      "category": "pdf_clinical",
+      "description": "Drug-diagnosis match validation: Extractor Node must match ICD-10 C50.912 (ER-positive HER2-negative metastatic breast cancer) in Section 1 to confirm Palbociclib (Ibrance) 125mg is appropriately indicated. Auditor must pass without triggering a review loop.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 25.475,
+      "response_preview": "**Clinical Response:**\n\nYes, the diagnosis documented in the prior authorization supports the use of Palbociclib for Maria Gonzalez, but the request has **critical documentation gaps** that create a high denial risk.\n\n**Patient Summary:**  \n50-year-old female with Stage II invasive ductal carcinoma "
+    },
+    {
+      "id": "gs-053",
+      "category": "policy_extraction",
+      "description": "Payer extracted from query text (no explicit payer_id supplied). Orchestrator must use Haiku to extract \"cigna\" from the query and write it to state[\"payer_id\"] so policy_search can run.  Result must include Cigna policy criteria \u2014 not a no-policy-found message. Policy criteria extractions now use source=\"policy_search\" which passes the auditor's os.path.isfile guard \u2014 response must NOT be \"partial results\".\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 25.498,
+      "response_preview": "**Clinical Response:**\n\nYes, John Smith meets all five of Cigna's Medical Policy #012 criteria for total knee arthroplasty. The discharge summary explicitly documents: **(Criteria A)** Severe end-stage osteoarthritis of the right knee confirmed by X-ray (02/10/2026) showing near-complete joint space"
+    },
+    {
+      "id": "gs-054",
+      "category": "policy_extraction",
+      "description": "Policy query with an imaging procedure name (MRI) must NOT be blocked by the PDF gate.  \"Criteria for MRI\" means MRI is the procedure being authorized, not a request to read an attached MRI report.  The Orchestrator must classify this as data_source_required=EHR and pdf_required=false, so policy_search runs even though no PDF is attached.  Known payer (aetna) is in mock data.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "HIGH"
+      },
+      "latency_seconds": 9.486,
+      "response_preview": "I did not have access to Aetna prior authorization criteria documents, MRI clinical guidelines, or diagnostic imaging policy sources for this query.\n\nBased on the clinical facts provided, I can confirm John Smith's current medications (Metformin 500mg twice daily, Lisinopril 10mg once daily, Atorvas"
+    },
+    {
+      "id": "gs-055",
+      "category": "policy_extraction",
+      "description": "Scenario A variant: patient not found in EHR mock data but a prior-auth PDF is attached.  Policy query should still proceed \u2014 pdf_extractor runs as fallback for clinical evidence, and policy_search evaluates payer criteria using evidence extracted from the PDF.  Response must not claim the patient does not exist without offering PDF-based assessment.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.49999999999999994,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 21.639,
+      "response_preview": "I did not have access to knee replacement criteria documentation or orthopedic records for this query.\n\nThe only source available was a prior authorization request for **Palbociclib (Ibrance)** for breast cancer treatment, not knee replacement. That document pertains to Maria J. Gonzalez's Stage II "
+    },
+    {
+      "id": "gs-056",
+      "category": "policy_extraction",
+      "description": "Policy query with no payer mentioned and no payer_id supplied.  The agent must not crash or hallucinate a payer.  Expected outcome: policy_search runs but returns a no_policy_found response (empty payer_id \u2192 no match in mock data), and the response asks the user to specify a payer or reports that criteria are unavailable without a payer name.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 23.765,
+      "response_preview": "**Clinical Response:**\n\nYes, John Smith meets all documented criteria for total right knee arthroplasty. He has end-stage primary osteoarthritis of the right knee (ICD-10: M17.11) confirmed by imaging showing severe tricompartmental disease with near-complete medial joint space loss. He completed 18"
+    },
+    {
+      "id": "gs-057",
+      "category": "policy_extraction",
+      "description": "Procedure extracted as a description (not a CPT code) from query text. \"Total knee arthroplasty\" should be accepted as procedure_identifier and passed to policy_search.  The tool must not crash on a non-numeric procedure string; Cigna criteria must still be retrieved and evaluated. Policy criteria extractions pass the auditor in one shot (no retry loop).\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 26.739,
+      "response_preview": "**Patient Summary:**  \nJohn Smith is a 57-year-old male with end-stage right knee osteoarthritis (ICD-10: M17.11) presenting with severe pain (8/10 VAS), limited flexion to 95 degrees, and significant functional impairment affecting activities of daily living.\n\n**Key Clinical Findings:**  \nImaging c"
+    },
+    {
+      "id": "gs-058",
+      "category": "auditor_fix",
+      "description": "Regression guard for the auditor retry-loop bug. Policy criteria extractions use source=\"policy_search\" which is not a real file on disk.  Before the fix, the auditor tried to open \"policy_search\" as a file, failed, and re-ran the extractor up to 3 times (25 tool calls total). After the os.path.isfile guard, the auditor short-circuits to pass immediately. Response must show policy criteria results and must NOT be \"partial results\". Confidence must be full (\u2265 0.85), not the 0.5 ceiling-hit score.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 24.36,
+      "response_preview": "**Prior Authorization Assessment: John Smith \u2014 CPT 27447 (Total Knee Arthroplasty, Right)**\n\n**Patient Summary:**  \nJohn Smith, 57-year-old male with primary osteoarthritis of the right knee (ICD-10: M17.11) and essential hypertension (I10). Known allergies: Penicillin (anaphylaxis) and Sulfa drugs "
+    },
+    {
+      "id": "gs-059",
+      "category": "auditor_fix",
+      "description": "Regression guard for the PDF content filter fix. Before the fix, ALLERGIES intent queries filtered extractions to kind=\"allergy\" only \u2014 PDF extractions had no kind field and returned \"unknown\", which was excluded.  The LLM saw empty facts and returned a refusal (\"no allergy records accessed\"). After the fix, PDF extractions are tagged kind=\"pdf_content\" at creation time and included in the ALLERGIES filter so chart-documented allergy information reaches the synthesis LLM. Query uses \"in this chart\" phrasing to explicitly trigger PDF content lookup.\n",
+      "passed": true,
+      "scores": {
+        "must_contain": true,
+        "must_not_contain": true,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": true,
+        "denial_risk_level": "CRITICAL"
+      },
+      "latency_seconds": 24.263,
+      "response_preview": "**John Smith's Documented Allergies for Surgical Prep:**\n\nJohn Smith has **two documented allergies** that must be considered for surgical preparation:\n\n1. **Penicillin** \u2014 documented anaphylaxis in 2019 (severe/life-threatening reaction)\n2. **Sulfa drugs** \u2014 documented rash in 2021\n\n**Critical Surg"
+    },
+    {
+      "id": "gs-060",
+      "category": "hallucination_regression",
+      "description": "Fenofibrate is a fibrate ester \u2014 it does NOT contain a sulfonamide moiety and is NOT contraindicated in patients with sulfa allergy per FDA label. John Smith has documented Sulfa and Penicillin allergies. The agent's deterministic check_allergy_conflict must return no conflict, and the synthesis LLM must honour that result WITHOUT adding its own chemical cross-reactivity reasoning. Response must NOT mention sulfonamide, moiety, or contraindication for Fenofibrate, and must state no allergy conflict.\n",
+      "passed": false,
+      "scores": {
+        "must_contain": false,
+        "must_not_contain": false,
+        "confidence_max": true,
+        "escalate": true,
+        "denial_risk": true
+      },
+      "actual": {
+        "confidence": 0.95,
+        "escalate": false,
+        "denial_risk_level": "NONE"
+      },
+      "latency_seconds": 8.038,
+      "response_preview": "\u26a0\ufe0f ALLERGY CONFLICT: Fenofibrate is contraindicated. Do NOT administer.\n\nJohn Smith has a documented allergy to Sulfa drugs. Fenofibrate is a fibric acid derivative that contains a sulfonamide moiety and is contraindicated in patients with sulfonamide hypersensitivity. Administering this medication "
+    }
+  ],
+  "timestamp": "20260301_221245"
+}
