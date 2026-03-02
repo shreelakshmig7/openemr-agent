@@ -2,18 +2,26 @@
 
 Healthcare RCM (Revenue Cycle Management) AI agent: natural language → LangGraph pipeline → tools (patient/meds, PDF extraction, policy search, denial risk) → cited, auditable responses.
 
-See **memory-bank/agent-reference.md** for architecture, tool status, and decisions.
+## Live Application
 
-## Mock data and test PDFs
+| Environment | URL |
+|---|---|
+| **OpenEMR (Production EHR)** | [http://64.225.50.120:8300](http://64.225.50.120:8300) |
+| **AgentForge API (Railway)** | [https://web-production-5d03.up.railway.app](https://web-production-5d03.up.railway.app) |
 
-Mock inputs live in **`mock_data/`**. See **[mock_data/README.md](mock_data/README.md)** for the full list.
+Login to OpenEMR and navigate to the **AgentForge** tab to use the AI agent. The agent is backed by 12 live patient records with medications, allergies, insurance, and encounter data.
 
-- **JSON:** `patients.json`, `medications.json`, `interactions.json` (used by mock tools).
-- **Test PDFs (required for evals gs-036–gs-052):**
-  - **`AgentForge_Test_PriorAuth.pdf`** — Prior-authorization test document.
-  - **`AgentForge_Test_ClinicalNote.pdf`** — Clinical note test document.
+## Documentation
 
-Eval cases gs-036 through gs-052 depend on these two PDFs being present in `mock_data/`. Confirm they are committed before running the full eval suite.
+| Document | Description |
+|---|---|
+| [`docs/AgentForge_PreSearch_Doc.md`](docs/AgentForge_PreSearch_Doc.md) | Full system design, architecture, and pre-search research |
+| [`docs/agent-architecture-doc.md`](docs/agent-architecture-doc.md) | 8-node LangGraph pipeline — node roles, state schema, tool inventory |
+| [`docs/BOUNTY.md`](docs/BOUNTY.md) | Standout feature submission — safety gate and staging-to-sync workflow |
+| [`docs/AI_COST_ANALYSIS.md`](docs/AI_COST_ANALYSIS.md) | Token usage and cost breakdown per agent run |
+| [`docs/SETUP_GUIDE.md`](docs/SETUP_GUIDE.md) | Local and production setup instructions |
+| [`docs/CODING_STANDARDS.md`](docs/CODING_STANDARDS.md) | Code style and contribution standards |
+| [`eval/DATASET_README.md`](eval/DATASET_README.md) | RCM benchmark dataset documentation |
 
 ## Open Source Contributions
 
@@ -25,7 +33,8 @@ The benchmark covers four clinical categories: Clinical Extraction, Denial Logic
 
 ## Runbook
 
-- **Live:** [Railway](https://openemr-agent-production.up.railway.app)
-- **Eval:** 62 cases in `eval/golden_data.yaml`; runner `eval/run_eval.py`; results under `tests/results/`.
+- **OpenEMR UI:** [http://64.225.50.120:8300](http://64.225.50.120:8300) — login `admin`, navigate to AgentForge tab
+- **Agent API:** [https://web-production-5d03.up.railway.app](https://web-production-5d03.up.railway.app)
+- **Eval:** 62 cases in `eval/golden_data.yaml`; runner `eval/run_eval.py`; results under `tests/results/`
 - **Benchmark:** `contrib/benchmarks/rcm_agent_evals/golden_data.yaml`
-- **Coding standards:** `docs/CODING_STANDARDS.md`
+- **Setup:** [`docs/SETUP_GUIDE.md`](docs/SETUP_GUIDE.md)
