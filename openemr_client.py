@@ -694,11 +694,18 @@ class OpenEMRClient:
     async def get_fhir_medications(self, patient_uuid: str) -> list[dict[str, Any]]:
         """
         Fetch active medications for a patient via FHIR R4 MedicationRequest.
-        →  ``GET /apis/default/fhir/MedicationRequest?patient={uuid}&status=active``
+        →  ``GET /apis/default/fhir/MedicationRequest?patient={uuid}``
 
         Parses each MedicationRequest entry into a simplified dict matching
         the mock_data/medications.json schema so downstream tools receive a
         consistent shape regardless of data source.
+
+        OpenEMR maps the SQL ``prescriptions.dosage`` column (e.g. "500mg")
+        to ``dosageInstruction[0].text``, and ``prescriptions.note`` to
+        ``dosageInstruction[0].patientInstruction``.  The structured
+        ``doseAndRate[0].doseQuantity`` is only populated when the
+        prescription was entered via the FHIR API with explicit quantity
+        values.  Frequency lives in ``dosageInstruction[0].timing``.
 
         Args:
             patient_uuid: FHIR Patient UUID.
@@ -707,6 +714,74 @@ class OpenEMRClient:
             List of dicts: [{"name": str, "dose": str, "frequency": str}, ...]
             Empty list on error or no medications found.
         """
+        _GENERIC_NAMES = {"unknown", "unspecified", "other", "none", ""}
+
+        def _extract_med_name(res: dict) -> str:
+            """Return the best available medication name, or '' if unusable."""
+            med_cc = res.get("medicationCodeableConcept", {})
+            name = med_cc.get("text", "").strip()
+            if name and name.lower() not in _GENERIC_NAMES:
+                return name
+            for coding in med_cc.get("coding", []):
+                display = coding.get("display", "").strip()
+                if display and display.lower() not in _GENERIC_NAMES:
+                    return display
+            # medicationReference is used when the medication is an external
+            # resource; only trust its display if it's a real name.
+            ref_display = res.get("medicationReference", {}).get("display", "").strip()
+            if ref_display and ref_display.lower() not in _GENERIC_NAMES:
+                return ref_display
+            return ""
+
+        def _extract_dose_frequency(di: dict) -> tuple[str, str]:
+            """
+            Extract (dose, frequency) from a dosageInstruction element.
+
+            Priority for dose:
+              1. doseAndRate[0].doseQuantity — structured value+unit (FHIR API path)
+              2. dosageInstruction.text      — OpenEMR maps prescriptions.dosage here
+                 (e.g. "500mg"); used as dose when the structured field is absent.
+
+            Priority for frequency:
+              1. timing.code.text            — human-readable schedule ("BID", etc.)
+              2. timing.repeat.frequency/period/periodUnit — structured cadence
+              3. patientInstruction          — OpenEMR maps prescriptions.note here
+                 (e.g. "twice daily for Type 2 Diabetes"); strip to first clause.
+            """
+            dose_str = ""
+            # 1. Structured dose quantity (preferred)
+            for dar in di.get("doseAndRate", []):
+                dq = dar.get("doseQuantity", {})
+                val = str(dq.get("value", "")).strip()
+                unit = dq.get("unit", "").strip()
+                if val:
+                    dose_str = f"{val} {unit}".strip()
+                    break
+            # 2. Free-text dose from dosageInstruction.text (OpenEMR SQL path)
+            if not dose_str:
+                dose_str = di.get("text", "").strip()
+
+            freq_str = ""
+            timing = di.get("timing", {})
+            # 1. Human-readable timing code
+            freq_str = timing.get("code", {}).get("text", "").strip()
+            # 2. Structured repeat — build "N times per period"
+            if not freq_str:
+                repeat = timing.get("repeat", {})
+                freq_n = repeat.get("frequency", "")
+                period = repeat.get("period", "")
+                period_unit = repeat.get("periodUnit", "")
+                if freq_n and period and period_unit:
+                    freq_str = f"{freq_n}x per {period} {period_unit}".strip()
+            # 3. patientInstruction — OpenEMR stores the prescription note here;
+            #    take only the first sentence/clause so it reads as a frequency.
+            if not freq_str:
+                pi = di.get("patientInstruction", "").strip()
+                if pi:
+                    freq_str = pi.split(" — ")[0].split(". ")[0]
+
+            return dose_str, freq_str
+
         try:
             data = await self._request(
                 "GET",
@@ -722,30 +797,18 @@ class OpenEMRClient:
                 if res.get("resourceType") != "MedicationRequest":
                     continue
 
-                # Medication name — prefer medicationCodeableConcept.text
-                med_cc   = res.get("medicationCodeableConcept", {})
-                name     = med_cc.get("text", "")
+                name = _extract_med_name(res)
                 if not name:
-                    codings = med_cc.get("coding", [{}])
-                    name    = codings[0].get("display", "") if codings else ""
-                if not name:
-                    name = res.get("medicationReference", {}).get("display", "Unknown")
+                    continue
 
-                # Dose + frequency from dosageInstruction[0]
-                di        = (res.get("dosageInstruction") or [{}])[0]
-                dose_qty  = di.get("doseAndRate", [{}])
-                dose_str  = ""
-                if dose_qty:
-                    dq = dose_qty[0].get("doseQuantity", {})
-                    dose_str = f"{dq.get('value', '')} {dq.get('unit', '')}".strip()
-                freq_str = di.get("text", "") or di.get("patientInstruction", "")
+                di = (res.get("dosageInstruction") or [{}])[0]
+                dose_str, freq_str = _extract_dose_frequency(di)
 
-                if name:
-                    meds.append({
-                        "name":      name,
-                        "dose":      dose_str  or "per prescription",
-                        "frequency": freq_str  or "per prescription",
-                    })
+                meds.append({
+                    "name":      name,
+                    "dose":      dose_str  or "per prescription",
+                    "frequency": freq_str  or "as directed",
+                })
             return meds
         except Exception as exc:
             logger.warning("OpenEMRClient.get_fhir_medications: %s", exc)
@@ -759,6 +822,12 @@ class OpenEMRClient:
         Returns a flat list of allergen names (strings) matching the format
         used in mock_data/patients.json so downstream tools are consistent.
 
+        OpenEMR stores SQL-seeded allergy titles (e.g. "Penicillin") in the
+        ``reaction[].substance`` field of the FHIR response.  The top-level
+        ``code`` field may only carry a generic "Unknown" placeholder when no
+        SNOMED/RxNorm code is mapped, so we check both fields and prefer the
+        most specific non-generic name found.
+
         Args:
             patient_uuid: FHIR Patient UUID.
 
@@ -766,6 +835,42 @@ class OpenEMRClient:
             List of allergen name strings, e.g. ["Penicillin", "Sulfa"].
             Empty list on error or no allergies found.
         """
+        _GENERIC_PLACEHOLDERS = {"unknown", "unspecified", "other", "none", ""}
+
+        def _extract_allergen_name(res: dict) -> str:
+            """Extract the best available allergen name from an AllergyIntolerance resource."""
+            # 1. Try code.text — most explicit free-text label
+            code = res.get("code", {})
+            name = code.get("text", "").strip()
+            if name and name.lower() not in _GENERIC_PLACEHOLDERS:
+                return name
+
+            # 2. Try code.coding[].display — may be a SNOMED display term
+            for coding in code.get("coding", []):
+                display = coding.get("display", "").strip()
+                if display and display.lower() not in _GENERIC_PLACEHOLDERS:
+                    return display
+
+            # 3. Try reaction[].substance — OpenEMR stores the free-text title here
+            #    for allergies seeded via the lists table (SQL / non-FHIR path).
+            for reaction in res.get("reaction", []):
+                substance = reaction.get("substance", {})
+                sub_text = substance.get("text", "").strip()
+                if sub_text and sub_text.lower() not in _GENERIC_PLACEHOLDERS:
+                    return sub_text
+                for sub_coding in substance.get("coding", []):
+                    sub_display = sub_coding.get("display", "").strip()
+                    if sub_display and sub_display.lower() not in _GENERIC_PLACEHOLDERS:
+                        return sub_display
+
+            # 4. Fall back to note text if present
+            for note in res.get("note", []):
+                text = note.get("text", "").strip()
+                if text and text.lower() not in _GENERIC_PLACEHOLDERS:
+                    return text
+
+            return ""
+
         try:
             data = await self._request(
                 "GET",
@@ -777,11 +882,7 @@ class OpenEMRClient:
                 res = entry.get("resource", {})
                 if res.get("resourceType") != "AllergyIntolerance":
                     continue
-                code  = res.get("code", {})
-                name  = code.get("text", "")
-                if not name:
-                    codings = code.get("coding", [{}])
-                    name    = codings[0].get("display", "") if codings else ""
+                name = _extract_allergen_name(res)
                 if name:
                     allergens.append(name)
             return allergens

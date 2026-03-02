@@ -128,15 +128,22 @@ def _fhir_patient_to_local(fhir_patient: dict) -> dict:
     # Allergies — prefer the value co-fetched by _fhir_name_lookup_async (same
     # client session, no extra round-trip).  Fall back to a separate async call
     # only when the resource arrived via a different code path (e.g. ID lookup).
+    # Filter out generic placeholders ("Unknown", etc.) that OpenEMR may emit
+    # for allergies that were seeded via SQL without a SNOMED/RxNorm code.
+    _ALLERGY_PLACEHOLDERS = {"unknown", "unspecified", "other", "none", ""}
+
+    def _filter_allergies(raw: list[str]) -> list[str]:
+        return [a for a in (raw or []) if a and a.strip().lower() not in _ALLERGY_PLACEHOLDERS]
+
     if "_prefetched_allergies" in fhir_patient:
-        allergies: list[str] = fhir_patient["_prefetched_allergies"] or []
+        allergies: list[str] = _filter_allergies(fhir_patient["_prefetched_allergies"])
         if allergies:
             logger.info(
                 "tools._fhir_patient_to_local: using %d pre-fetched allerg%s for %s",
                 len(allergies), "y" if len(allergies) == 1 else "ies", full_name,
             )
     elif fhir_id:
-        allergies = _run_async_in_thread(_fhir_allergies_async(fhir_id)) or []
+        allergies = _filter_allergies(_run_async_in_thread(_fhir_allergies_async(fhir_id)))
         if allergies:
             logger.info(
                 "tools._fhir_patient_to_local: fetched %d allerg%s for %s from FHIR (fallback)",
@@ -453,9 +460,16 @@ def get_medications(patient_id: str) -> dict:
         dict with keys: success, patient_id, medications, source, error.
     """
     # ── Step 1: FHIR MedicationRequest (UUID input) ──────────────────────
+    _GENERIC_MED_NAMES = {"unknown", "unspecified", "other", "none", ""}
+
     if _is_fhir_uuid(patient_id):
         logger.info("tools.get_medications: trying FHIR MedicationRequest for %s", patient_id)
-        fhir_meds = _run_async_in_thread(_fhir_medications_async(patient_id))
+        raw_fhir_meds = _run_async_in_thread(_fhir_medications_async(patient_id))
+        # Filter out any entries whose name resolved to a generic placeholder.
+        fhir_meds = [
+            m for m in (raw_fhir_meds or [])
+            if m.get("name", "").strip().lower() not in _GENERIC_MED_NAMES
+        ]
         if fhir_meds:
             logger.info(
                 "tools.get_medications: FHIR returned %d medications for %s",
@@ -467,8 +481,11 @@ def get_medications(patient_id: str) -> dict:
                 "medications": fhir_meds,
                 "source":     "Live EHR (OpenEMR FHIR)",
             }
-        # FHIR empty — resolve UUID to local ID for mock_data fallback
-        logger.info("tools.get_medications: FHIR empty, resolving UUID to local ID")
+        # FHIR empty or all-generic — resolve UUID to local ID for mock_data fallback
+        logger.info(
+            "tools.get_medications: FHIR returned 0 usable medications for %s (raw=%s) — falling back to mock_data",
+            patient_id, raw_fhir_meds,
+        )
         local_id = _resolve_local_id_from_uuid(patient_id)
     else:
         local_id = patient_id
@@ -509,11 +526,18 @@ def get_allergies(patient_id: str) -> dict:
     """
     local_id: Optional[str] = None
 
+    _GENERIC_PLACEHOLDERS = {"unknown", "unspecified", "other", "none", ""}
+
     if _is_fhir_uuid(patient_id):
         logger.info("tools.get_allergies: fetching FHIR AllergyIntolerance for %s", patient_id)
-        fhir_allergies = _run_async_in_thread(_fhir_allergies_async(patient_id))
+        raw_fhir_allergies = _run_async_in_thread(_fhir_allergies_async(patient_id))
+        # Filter out generic placeholders that OpenEMR may emit for uncoded allergies.
+        fhir_allergies = [
+            a for a in (raw_fhir_allergies or [])
+            if a and a.strip().lower() not in _GENERIC_PLACEHOLDERS
+        ]
         if fhir_allergies:
-            # FHIR returned at least one allergy — use it as authoritative.
+            # FHIR returned at least one named allergy — use it as authoritative.
             logger.info(
                 "tools.get_allergies: FHIR returned %d allerg%s for %s",
                 len(fhir_allergies), "y" if len(fhir_allergies) == 1 else "ies", patient_id,
@@ -524,12 +548,10 @@ def get_allergies(patient_id: str) -> dict:
                 "allergies":  fhir_allergies,
                 "source":     "Live EHR (OpenEMR FHIR)",
             }
-        # FHIR returned empty list or failed — OpenEMR's demo build may not surface
-        # seeded allergies via the FHIR AllergyIntolerance endpoint.  Resolve the
-        # FHIR UUID to a local P00X ID so we can fall back to mock_data.
+        # FHIR returned empty list, all-generic names, or failed — fall back to mock_data.
         logger.info(
-            "tools.get_allergies: FHIR returned 0 allergies for %s — falling back to mock_data",
-            patient_id,
+            "tools.get_allergies: FHIR returned 0 usable allergies for %s (raw=%s) — falling back to mock_data",
+            patient_id, raw_fhir_allergies,
         )
         local_id = _resolve_local_id_from_uuid(patient_id)
     else:
