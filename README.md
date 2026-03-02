@@ -20,16 +20,15 @@ Login to OpenEMR and navigate to the **AgentForge** tab to use the AI agent. The
 | [`docs/BOUNTY.md`](docs/BOUNTY.md) | Standout feature submission — safety gate and staging-to-sync workflow |
 | [`docs/AI_COST_ANALYSIS.md`](docs/AI_COST_ANALYSIS.md) | Token usage and cost breakdown per agent run |
 | [`docs/SETUP_GUIDE.md`](docs/SETUP_GUIDE.md) | Local and production setup instructions |
-| [`docs/CODING_STANDARDS.md`](docs/CODING_STANDARDS.md) | Code style and contribution standards |
 | [`eval/DATASET_README.md`](eval/DATASET_README.md) | RCM benchmark dataset documentation |
+| [`contrib/benchmarks/rcm_agent_evals/README.md`](contrib/benchmarks/rcm_agent_evals/README.md) | Open source RCM benchmark — 59 clinical test cases |
 
 ## Open Source Contributions
 
 As part of this project, we have released a public RCM evaluation dataset
-containing 59 validated clinical test cases. This dataset is now hosted
-within our OpenEMR fork at:
+containing 59 validated clinical test cases. This dataset is hosted at:
 
-https://github.com/shreelakshmig7/openemr/tree/master/contrib/benchmarks/rcm_agent_evals
+https://github.com/shreelakshmig7/openemr-agent/tree/main/contrib/benchmarks/rcm_agent_evals
 
 ## Runbook
 
