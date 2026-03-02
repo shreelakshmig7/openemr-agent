@@ -235,7 +235,16 @@ def _output_node(state: AgentState) -> AgentState:
         # Build PDF-only citation anchors for the UI viewer.
         # EHR/mock sources (patients.json, medications.json, etc.) are excluded —
         # only PDF extractions carry page numbers and deserve a viewer link.
+        # Anchors are sorted so the page most relevant to the query comes first —
+        # the UI auto-jumps to anchors[0], so this ensures it opens the answer page.
+        query_text = state.get("input_query", "").lower()
+        _stop_words = {"the", "a", "an", "is", "are", "was", "were", "what",
+                       "does", "do", "has", "have", "for", "in", "of", "to",
+                       "and", "or", "with", "any", "this", "that", "be", "it"}
+        query_words = {w for w in query_text.split() if w not in _stop_words}
+
         seen_anchors: set = set()
+        anchor_scores: dict = {}
         citation_anchors = []
         for e in relevant:
             src = e.get("source", "")
@@ -253,6 +262,18 @@ def _output_node(state: AgentState) -> AgentState:
                 "file": src,
                 "page": page_num,
             })
+            # Score by keyword overlap between the query and this extraction's claim.
+            claim = e.get("claim", "").lower()
+            anchor_scores[anchor_key] = (
+                sum(1 for w in query_words if w in claim) if query_words else 0
+            )
+
+        # Put the highest-scoring (most query-relevant) page first so the UI
+        # auto-jumps straight to the answer page.
+        citation_anchors.sort(
+            key=lambda a: anchor_scores.get((a["file"], a["page"]), 0),
+            reverse=True,
+        )
         state["citation_anchors"] = citation_anchors
 
         # ── Gate 3: synthesize with SOURCE_INTEGRITY hard rule injected ────
