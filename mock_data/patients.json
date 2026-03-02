@@ -98,6 +98,15 @@
         "gender": "Male",
         "allergies": [],
         "conditions": ["Preventive Care"]
+      },
+      {
+        "id": "P012",
+        "name": "John Smith",
+        "dob": "1990-05-20",
+        "age": 34,
+        "gender": "Male",
+        "allergies": ["Latex"],
+        "conditions": ["Annual physical"]
       }
     ]
   }

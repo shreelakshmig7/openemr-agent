@@ -21,6 +21,8 @@
 #   no-payer-mentioned graceful fallback, procedure-as-description extraction.
 # PR 5 additions (gs-058 to gs-059):
 #   Auditor virtual-source short-circuit fix (os.path.isfile guard).
+# Identity resolution (gs-060 to gs-062): composite key name+DOB; same-name
+#   different DOB must not merge; local cache used when FHIR unavailable.
 #   Policy criteria extractions with source="policy_search" and FHIR extractions
 #   with source="openemr_fhir" no longer trigger the 3× retry loop — auditor
 #   short-circuits to pass for any source string that is not a real file on disk.
@@ -1500,3 +1502,63 @@ test_cases:
       - "traceback"
     expected_escalate: false
     difficulty: "hallucination_regression"
+
+  # ── Identity resolution (composite key: name + DOB) ───────────────────────
+
+  - id: "gs-060"
+    category: "identity_resolution"
+    description: >
+      When DOB 1965-03-15 is provided with name John Smith, the agent must
+      resolve to the correct patient (P001) and report that patient's allergies
+      (Penicillin, Sulfa). Validates composite-key matching in local cache.
+    query: "Does John Smith DOB 1965-03-15 have any allergies?"
+    expected_tools:
+      - get_patient_info
+    expected_sources:
+      - mock_data/patients.json
+    must_contain:
+      - "penicillin"
+      - "sulfa"
+    must_not_contain:
+      - "latex"
+      - "not found"
+      - "error"
+    difficulty: "identity_resolution"
+
+  - id: "gs-061"
+    category: "identity_resolution"
+    description: >
+      When DOB 1990-05-20 is provided with name John Smith, the agent must
+      resolve to the other patient (P012) and report that patient's allergies
+      (Latex). Must NOT report P001's allergies (Penicillin, Sulfa).
+    query: "What are John Smith's allergies? Date of birth 1990-05-20."
+    expected_tools:
+      - get_patient_info
+    expected_sources:
+      - mock_data/patients.json
+    must_contain:
+      - "latex"
+    must_not_contain:
+      - "penicillin"
+      - "sulfa"
+      - "not found"
+      - "error"
+    difficulty: "identity_resolution"
+
+  - id: "gs-062"
+    category: "identity_resolution"
+    description: >
+      Without DOB, name-only lookup may return first matching patient (legacy).
+      Response should still reflect a valid John Smith from the system.
+    query: "What medications is John Smith on?"
+    expected_tools:
+      - get_patient_info
+      - get_medications
+    expected_sources:
+      - mock_data/patients.json
+    must_contain:
+      - "metformin"
+    must_not_contain:
+      - "not found"
+      - "error"
+    difficulty: "identity_resolution"
