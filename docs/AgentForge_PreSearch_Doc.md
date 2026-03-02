@@ -302,21 +302,24 @@ profitable.*
 extraction, Claude 3.5 Sonnet for medical necessity reasoning and final
 verification.**
 
-  ------------------ ------------------------ ---------------------------------
-  **Task**           **Model**                **Reason**
+  ---------------------------------- ------------------------- ----------------------------------------
+  **Task**                           **Model**                 **Reason**
 
-  PDF text           Claude Haiku             Cheap, fast, sufficient for
-  extraction                                  structured extraction
+  Intent classification +            Claude Haiku              Cheap, fast; single call covers intent
+  patient/payer extraction           (claude-haiku-4-5)        classification AND patient name/DOB
+  (Router + Orchestrator)                                       extraction — halves API load vs two calls
 
-  Policy matching    Claude 3.5 Sonnet        Complex medical reasoning
-  and reasoning                               requires full capability
+  PDF text extraction + tool         Claude Haiku              Sufficient for structured extraction
+  coordination (Extractor)           (claude-haiku-4-5)        and tool orchestration
 
-  Final verification Claude 3.5 Sonnet        High-stakes decision --- worth
-  and audit                                   the cost
+  Final verification, citation       Claude Sonnet             High-stakes medical reasoning requires
+  audit, response synthesis          (claude-sonnet-4-5)       full capability; worth the cost
+  (Auditor)                                                     
 
-  Embedding          text-embedding-3-small   Cost-effective vector indexing of
-  generation                                  policy docs
-  ------------------ ------------------------ ---------------------------------
+  Embedding generation               Voyage AI                 Higher recall on clinical/policy text
+  (policy_search)                    (voyage-large-2)          than general-purpose embedding models;
+                                                               falls back to keyword mock when key unset
+  ---------------------------------- ------------------------- ----------------------------------------
 
 **2.3 Tool Design**
 
@@ -330,8 +333,8 @@ unstructured.io handles messy real-world documents that basic PDF
 parsers fail on.*
 
 **Final Decision: Production toolset: unstructured.io for PDF parsing,
-Pinecone vector DB for policy search, ICD-10/CPT validator, Microsoft
-Presidio for PII scrubbing.**
+Pinecone + Voyage AI for policy search, OpenEMR FHIR R4 for patient
+data, Microsoft Presidio for PII scrubbing.**
 
   ------------------------------- ------------------ -----------------------------------
   **Tool**                        **Library**        **What It Does**
@@ -354,6 +357,11 @@ Presidio for PII scrubbing.**
   get_allergies(patient_id)       OpenEMR FHIR R4    Retrieves allergy list via
                                   + mock fallback    AllergyIntolerance; FHIR primary,
                                                      mock_data secondary
+
+  check_drug_interactions         Custom tool        Checks a list of medications against
+  (medications)                  (mock_data)        known drug–drug interaction patterns;
+                                                     returns severity, description, and
+                                                     FDA recommendation
 
   check_allergy_conflict          Custom tool        Flags drug–allergy conflicts by
   (drug, allergies)                                  name and drug class
@@ -497,30 +505,37 @@ clinical scenarios, not just generic AI safety tests.*
 contradictory notes, ambiguous laterality, and missing evidence
 scenarios --- alongside standard adversarial inputs.**
 
-  ---------------- ----------- ---------------------------------------------
-  **Test           **Count**   **Example**
-  Category**                   
+  ----------------------------- ------- -------------------------------------------------
+  **Test Category**             **Count** **Example**
 
-  Happy path       20+         Complete chart with clear evidence --- expect
-                               full citation and approval recommendation
+  Happy path (EHR queries)      10      Patient medications, allergies, interactions ---
+                                        full citation and correct answer
 
-  Missing evidence 10+         Chart lacks \'failed conservative therapy\'
-                               --- expect \'Insufficient Documentation\'
-                               flag
+  Edge cases                    16      Non-existent patient ID, pronoun-only queries,
+                                        cross-patient cache collision guard, EHR
+                                        confidence penalty (PDF + unknown patient)
 
-  Contradictory    10+         \'Stable\' Day 1, \'Worsening\' Day 3 ---
-  notes                        expect contradiction flag with both quotes
-                               cited
+  Adversarial inputs            7       Prompt injection, fabrication requests, pirate
+                                        talk --- expect refusal and safe fallback
 
-  Ambiguous        5+          \'Left leg pain\' with \'Right knee MRI\' ---
-  laterality                   expect Clarification Required status
+  PDF clinical (prior auth +    17      Full PDF-grounded suite using
+  clinical note)                        AgentForge_Test_PriorAuth.pdf and
+                                        AgentForge_Test_ClinicalNote.pdf; covers policy
+                                        criteria gaps, ICD/CPT alignment, denial risk,
+                                        treatment contradictions, laterality,
+                                        anti-hallucination guardrails
 
-  Adversarial      10+         Prompt injection, fabrication requests ---
-  inputs                       expect refusal and safe fallback
+  Policy extraction             5       Payer/procedure extracted from query text;
+                                        imaging-procedure classification (MRI as
+                                        procedure, not imaging source)
 
-  Low-quality PDFs 5+          Scanned handwritten notes --- expect graceful
-                               partial extraction with gaps flagged
-  ---------------- ----------- ---------------------------------------------
+  Auditor fix / regression      2       Citation verification and auditor synthesis
+                                        regression cases
+
+  **Total**                     **59**  Implemented in eval/golden_data.yaml; runner:
+                                        eval/run_eval.py; results saved to
+                                        tests/results/
+  ----------------------------- ------- -------------------------------------------------
 
 **3.4 Open Source Contribution**
 
@@ -828,35 +843,57 @@ A documented runbook is maintained in the GitHub repository covering:
   --------------- --------------------- ----------------------------------
   **Layer**       **Technology**        **Purpose**
 
-  LLM ---         Claude Haiku          Cheap, fast extraction from
-  Extraction                            clinical PDFs
+  LLM ---         Claude Haiku          Router (intent classification) +
+  Routing &       (claude-haiku-4-5)    Orchestrator (tool_plan + patient
+  Extraction                            extraction) + Extractor (tool
+                                        coordination)
 
-  LLM ---         Claude 3.5 Sonnet     Complex medical necessity
-  Reasoning                             reasoning and final verification
+  LLM ---         Claude Sonnet         Auditor Node: citation validation,
+  Verification    (claude-sonnet-4-5)   response synthesis, confidence
+                                        scoring
 
-  Orchestration   LangGraph Multi-Agent Extractor → Auditor → Review Loop
-                                        → Output
+  Orchestration   LangGraph Multi-Agent Router → Orchestrator → Extractor
+                  (8-node graph)        → Comparison → Auditor → Output;
+                                        HITL path: Orchestrator → Sync
+                                        Execution; Review loop capped at 3
 
-  State           LangGraph State       pending_user_input flag preserves
-  Management      Schema                work on ambiguity
+  State           3-layer memory        Layer 1: conversation history;
+  Management      (LangGraph +          Layer 2: session cache (patient,
+                  SQLite)               PDF, policy); Layer 3: SQLite
+                                        checkpointer for crash recovery
+
+  Evidence        SQLite                evidence_staging table: PENDING →
+  Staging         (evidence_staging     SYNCED lifecycle for extracted
+                  .sqlite)              clinical markers before FHIR POST
+
+  FHIR Mapping    fhir_mapper.py +      Translates extracted facts to FHIR
+                  openemr_client.py     R4 Observation/AllergyIntolerance;
+                                        18-code LOINC registry; POSTed to
+                                        OpenEMR with SQLite fallback
 
   PDF Processing  unstructured.io       Handles messy scanned clinical
                                         documents
 
-  Policy Search   Pinecone Vector DB    Semantic search over 200-page
-                                        payer policy PDFs
+  Policy Search   Pinecone + Voyage AI  Semantic search over payer policy
+                                        PDFs; keyword mock fallback when
+                                        keys are not configured
 
-  PII Protection  Microsoft Presidio    Local scrubbing before any cloud
-                                        LLM call
+  PII Protection  Microsoft Presidio    Local scrubbing (PERSON, SSN, MRN,
+                  + regex fallback      DOB, PHONE, EMAIL) before any cloud
+                                        LLM call; graceful fallback to
+                                        5-regex stub if Presidio not
+                                        installed
 
   Observability   LangSmith             Faithfulness, relevancy, citation
-                                        accuracy metrics
+                                        accuracy metrics; per-node timing
 
-  API Server      FastAPI + Uvicorn     HTTP endpoints for agent
-                                        interaction
+  API Server      FastAPI + Uvicorn     /ask, /ask/stream (SSE), /history,
+                                        /upload, /pdf, /eval, /eval/results,
+                                        /api/audit/{thread_id}
 
-  Open Source     Eval Dataset on       50+ RCM test cases released
-                  HuggingFace           publicly
+  Open Source     Eval Dataset          59 golden test cases in
+                  (eval/golden_data     eval/golden_data.yaml; runner:
+                  .yaml)                eval/run_eval.py
   --------------- --------------------- ----------------------------------
 
 *This Pre-Search document was completed before writing any production
