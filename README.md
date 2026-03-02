@@ -15,6 +15,7 @@ Login to OpenEMR and navigate to the **AgentForge** tab to use the AI agent. The
 
 | Document | Description |
 |---|---|
+| [`docs/USER_MANUAL.md`](docs/USER_MANUAL.md) | **User Manual** — complete guide to all features for clinical staff and administrators |
 | [`docs/AgentForge_PreSearch_Doc.md`](docs/AgentForge_PreSearch_Doc.md) | Full system design, architecture, and pre-search research |
 | [`docs/agent-architecture-doc.md`](docs/agent-architecture-doc.md) | 8-node LangGraph pipeline — node roles, state schema, tool inventory |
 | [`docs/BOUNTY.md`](docs/BOUNTY.md) | Standout feature submission — safety gate and staging-to-sync workflow |
