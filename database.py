@@ -37,6 +37,7 @@ Project: AgentForge — Healthcare RCM AI Agent
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -48,7 +49,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # DB location — sits alongside this module inside openemr-agent/
 # ---------------------------------------------------------------------------
-_DB_PATH: Path = Path(__file__).parent / "evidence_staging.sqlite"
+_DB_PATH: Path = Path(
+    os.getenv("DB_PATH", str(Path(__file__).parent / "evidence_staging.sqlite"))
+)
 
 # ---------------------------------------------------------------------------
 # Schema DDL
