@@ -223,6 +223,34 @@
     }
     .chip:hover { background: #bee3f8; }
 
+    /* ── New-case session divider ── */
+    .new-case-divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      align-self: stretch;
+      color: #718096;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin: 4px 0;
+    }
+    .new-case-divider::before,
+    .new-case-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: #e2e8f0;
+    }
+    .new-case-divider span {
+      background: #f7fafc;
+      padding: 2px 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      white-space: nowrap;
+    }
+
     /* ── Message bubbles ── */
     .msg { display: flex; flex-direction: column; max-width: 680px; width: 100%; }
     .msg.user  { align-self: flex-end; align-items: flex-end; }
@@ -939,19 +967,12 @@
     pdfBadge.style.display = 'none';
     pdfBadgeName.textContent = '';
     closePdfPane();
-    // Reset chat to welcome state
-    chat.innerHTML = `
-      <div class="welcome">
-        <h2>What can I help you with?</h2>
-        <p>Ask me about patient medications, drug interactions, or allergy conflicts. Attach a clinical PDF to unlock inline citations — click any 📄 tag to jump to the exact page.</p>
-        <div class="chips">
-          <button class="chip" onclick="sendChip(this)">💊 What medications is John Smith on?</button>
-          <button class="chip" onclick="sendChip(this)">⚠️ Check drug interactions for Mary Johnson</button>
-          <button class="chip" onclick="sendChip(this)">🚨 Is it safe to give Robert Davis Aspirin?</button>
-          <button class="chip" onclick="sendChip(this)">🩺 Does John Smith have any known allergies?</button>
-          <button class="chip" onclick="sendChip(this)">🚨 Is it safe to give Emily Rodriguez Amoxicillin?</button>
-        </div>
-      </div>`;
+    // Insert a session-break divider without clearing existing history
+    const divider = document.createElement('div');
+    divider.className = 'new-case-divider';
+    divider.innerHTML = `<span>New Case · ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>`;
+    chat.appendChild(divider);
+    chat.scrollTop = chat.scrollHeight;
     console.info('[HIPAA] Session purged. New thread: ' + threadId);
   }
 
