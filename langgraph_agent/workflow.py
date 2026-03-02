@@ -37,7 +37,7 @@ Project: AgentForge — Healthcare RCM AI Agent
 """
 
 import os
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 try:
     from langchain.callbacks.tracers import LangChainTracer
@@ -570,7 +570,156 @@ def get_state_for_audit(thread_id: str) -> Optional[dict]:
         return None
 
 
+def _node_summary_for_stream(node_name: str, update: dict) -> str:
+    """
+    Return a short user-facing status string for streaming UI progress.
+    Used when streaming workflow node updates over SSE.
+    """
+    if node_name == "router":
+        return "Checking your question..."
+    if node_name == "orchestrator":
+        u = update or {}
+        name = u.get("identified_patient_name")
+        if not name:
+            ep = u.get("extracted_patient")
+            if isinstance(ep, dict):
+                name = ep.get("name")
+        if name and str(name).strip():
+            return f"Patient found: {str(name).strip()}"
+        return "Identifying patient..."
+    if node_name == "extractor":
+        if (update or {}).get("extracted_pdf_pages") or (update or {}).get("extractions"):
+            return "PDF extracted, gathering data..."
+        return "Gathering data..."
+    if node_name == "auditor":
+        return "Reviewing..."
+    if node_name == "output":
+        return "Building answer..."
+    if node_name == "comparison":
+        return "Preparing response..."
+    if node_name == "sync_execution":
+        return "Syncing to chart..."
+    if node_name == "clarification":
+        return "Waiting for your input..."
+    return "Processing..."
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
+
+async def stream_workflow(
+    query: str,
+    session_id: Optional[str] = None,
+    clarification_response: Optional[str] = None,
+    pdf_source_file: Optional[str] = None,
+    prior_state: Optional[dict] = None,
+    payer_id: Optional[str] = None,
+    procedure_code: Optional[str] = None,
+) -> AsyncIterator[Dict[str, Any]]:
+    """
+    Run the workflow with streaming: yield progress events per node, then a final
+    "done" (with full state) or "error" event. Does not change run_workflow() or
+    graph behavior; uses astream(stream_mode="updates") then get_state() for final state.
+    """
+    _cache_fields = [
+        "extracted_patient",
+        "extracted_pdf_pages",
+        "extracted_pdf_hash",
+        "pdf_source_file",
+        "payer_policy_cache",
+        "denial_risk_cache",
+        "tool_call_history",
+        "prior_query_context",
+        "messages",
+        "pending_sync_confirmation",
+        "sync_summary",
+        "staged_patient_fhir_id",
+        "staged_session_id",
+    ]
+    try:
+        if clarification_response and prior_state and isinstance(prior_state, dict):
+            initial_state = dict(prior_state)
+            initial_state = resume_from_clarification(initial_state, clarification_response)
+            if session_id:
+                initial_state["session_id"] = session_id
+        else:
+            initial_state = create_initial_state(query)
+            if session_id:
+                initial_state["session_id"] = session_id
+            if pdf_source_file and pdf_source_file.strip():
+                initial_state["pdf_source_file"] = pdf_source_file.strip()
+            if payer_id:
+                initial_state["payer_id"] = payer_id
+            if procedure_code:
+                initial_state["procedure_code"] = procedure_code
+            if prior_state and isinstance(prior_state, dict):
+                for field in _cache_fields:
+                    value = prior_state.get(field)
+                    if field == "pending_sync_confirmation":
+                        if value is True:
+                            initial_state[field] = True
+                    elif value and not initial_state.get(field):
+                        initial_state[field] = value
+
+        invoke_config: dict = {}
+        if session_id:
+            invoke_config["configurable"] = {"thread_id": session_id}
+        if LangChainTracer and (os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")):
+            try:
+                tracer = LangChainTracer(project_name="agentforge-rcm")
+                invoke_config["callbacks"] = [tracer]
+            except Exception:
+                pass
+
+        used_config = invoke_config if invoke_config else None
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            with SqliteSaver.from_conn_string(_CHECKPOINT_DB) as checkpointer:
+                graph = _build_graph(checkpointer=checkpointer)
+                async for chunk in graph.astream(
+                    initial_state,
+                    config=used_config,
+                    stream_mode="updates",
+                ):
+                    if not isinstance(chunk, dict):
+                        continue
+                    for node_name, update in chunk.items():
+                        summary = _node_summary_for_stream(node_name, update if isinstance(update, dict) else {})
+                        yield {"event": "node", "node": node_name, "summary": summary}
+                snapshot = graph.get_state(used_config)
+                if snapshot and getattr(snapshot, "values", None):
+                    result_dict = dict(snapshot.values)
+                    if "tool_trace" not in result_dict:
+                        result_dict["tool_trace"] = []
+                    if "error" not in result_dict:
+                        result_dict["error"] = None
+                    yield {"event": "done", "state": result_dict}
+                else:
+                    yield {"event": "error", "error": "Workflow completed with no state."}
+        except Exception:
+            graph = _build_graph(checkpointer=None)
+            async for chunk in graph.astream(
+                initial_state,
+                config=used_config,
+                stream_mode="updates",
+            ):
+                if not isinstance(chunk, dict):
+                    continue
+                for node_name, update in chunk.items():
+                    summary = _node_summary_for_stream(node_name, update if isinstance(update, dict) else {})
+                    yield {"event": "node", "node": node_name, "summary": summary}
+            snapshot = graph.get_state(used_config)
+            if snapshot and getattr(snapshot, "values", None):
+                result_dict = dict(snapshot.values)
+                if "tool_trace" not in result_dict:
+                    result_dict["tool_trace"] = []
+                if "error" not in result_dict:
+                    result_dict["error"] = None
+                yield {"event": "done", "state": result_dict}
+            else:
+                yield {"event": "error", "error": "Workflow completed with no state."}
+    except Exception as e:
+        yield {"event": "error", "error": f"An unexpected error occurred: {str(e)}"}
+
 
 def run_workflow(
     query: str,

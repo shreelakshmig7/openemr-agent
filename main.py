@@ -12,6 +12,7 @@ queries, eval execution, and eval result retrieval.
 Endpoints:
     GET  /health                        — Service health check
     POST /ask                           — Natural language query with session context
+    POST /ask/stream                    — Same as /ask but streams SSE progress (node updates then done/error)
     GET  /history                       — Recent session list for the audit history sidebar
     GET  /history/{session_id}/messages — Full message transcript for a session
     POST /eval                          — Run eval suite and return results
@@ -26,7 +27,7 @@ import re
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List, Any
 
 import logging
 
@@ -34,10 +35,11 @@ from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, Query, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from langgraph_agent.workflow import run_workflow, get_state_for_audit
+from langgraph_agent.workflow import run_workflow, stream_workflow, get_state_for_audit
+from tools.pii_scrubber import scrub_pii
 from healthcare_guidelines import CLINICAL_SAFETY_RULES
 from eval.run_eval import run_eval, DEFAULT_GOLDEN_DATA_PATH
 import database
@@ -116,6 +118,7 @@ class AskResponse(BaseModel):
     tool_trace: list
     denial_risk: dict
     citation_anchors: list
+    query_redacted_preview: Optional[str] = None  # PII-scrubbed version of user question (for UI verification)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -393,6 +396,14 @@ def ask(request: AskRequest) -> AskResponse:
     except Exception:
         pass
 
+    # Scrubbed version of the user's question (what was sent to the agent after PII redaction).
+    # Included so the UI can show "Privacy: your message was redacted" and verify PII scrubber.
+    query_redacted_preview = None
+    try:
+        query_redacted_preview = scrub_pii(request.question)
+    except Exception:
+        pass
+
     return AskResponse(
         answer=answer,
         session_id=session_id,
@@ -404,6 +415,123 @@ def ask(request: AskRequest) -> AskResponse:
         tool_trace=result.get("tool_trace", []),
         denial_risk=result.get("denial_risk") or {},
         citation_anchors=result.get("citation_anchors") or [],
+        query_redacted_preview=query_redacted_preview,
+    )
+
+
+def _build_ask_response_dict(result: dict, session_id: str, request_question: str) -> dict:
+    """Build the same dict shape as AskResponse for streaming 'done' event or reuse."""
+    answer = result.get("final_response") or result.get("clarification_needed") or "Unable to process request."
+    confidence = result.get("confidence_score", 0.0)
+    denial_risk_level = (result.get("denial_risk") or {}).get("risk_level", "")
+    escalate = (
+        confidence < CLINICAL_SAFETY_RULES["confidence_threshold"]
+        or result.get("is_partial", False)
+        or denial_risk_level in ("HIGH", "CRITICAL")
+    )
+    disclaimer = CLINICAL_SAFETY_RULES["disclaimer"]
+    query_redacted_preview = None
+    try:
+        query_redacted_preview = scrub_pii(request_question)
+    except Exception:
+        pass
+    return {
+        "answer": answer,
+        "session_id": session_id,
+        "thread_id": session_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "escalate": escalate,
+        "confidence": confidence,
+        "disclaimer": disclaimer,
+        "tool_trace": result.get("tool_trace", []),
+        "denial_risk": result.get("denial_risk") or {},
+        "citation_anchors": result.get("citation_anchors") or [],
+        "query_redacted_preview": query_redacted_preview,
+    }
+
+
+async def _stream_ask_events(request: AskRequest):
+    """Async generator yielding SSE event strings for POST /ask/stream."""
+    session_id = _get_session_id(request.thread_id or request.session_id)
+    prior_state = _sessions.get(session_id)
+    clarification_response = None
+    query = request.question
+    if prior_state and prior_state.get("pending_user_input"):
+        clarification_response = request.question
+        query = prior_state.get("input_query", request.question)
+    pdf_path = _resolve_pdf_path(request.pdf_source_file)
+
+    try:
+        async for event in stream_workflow(
+            query=query,
+            session_id=session_id,
+            clarification_response=clarification_response,
+            pdf_source_file=pdf_path,
+            prior_state=prior_state,
+            payer_id=request.payer_id,
+            procedure_code=request.procedure_code,
+        ):
+            if event.get("event") == "node":
+                yield f"event: node\ndata: {json.dumps({'summary': event.get('summary', '')})}\n\n"
+            elif event.get("event") == "done":
+                result = event.get("state", {})
+                _sessions[session_id] = result
+                done_payload = _build_ask_response_dict(result, session_id, request.question)
+                try:
+                    patient_name = (result.get("identified_patient_name") or "").strip()
+                    patient_pid = str((result.get("extracted_patient") or {}).get("id", ""))
+                    intent = str(result.get("query_intent", "") or "")
+                    database.upsert_session(
+                        session_id,
+                        patient_name=patient_name,
+                        patient_pid=patient_pid,
+                        query_summary=query[:80],
+                        intent=intent,
+                    )
+                    database.insert_message(
+                        session_id,
+                        role="user",
+                        content=request.question,
+                        metadata=None,
+                        pdf_path=request.pdf_source_file or "",
+                    )
+                    database.insert_message(
+                        session_id,
+                        role="agent",
+                        content=done_payload["answer"],
+                        metadata={
+                            "confidence": done_payload["confidence"],
+                            "escalate": done_payload["escalate"],
+                            "disclaimer": done_payload["disclaimer"],
+                            "tool_trace": done_payload["tool_trace"],
+                            "denial_risk": done_payload["denial_risk"],
+                            "citation_anchors": done_payload["citation_anchors"],
+                        },
+                        pdf_path="",
+                    )
+                except Exception:
+                    pass
+                yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+            elif event.get("event") == "error":
+                yield f"event: error\ndata: {json.dumps({'error': event.get('error', 'Unknown error')})}\n\n"
+    except Exception as e:
+        yield f"event: error\ndata: {json.dumps({'error': f'An unexpected error occurred: {str(e)}'})}\n\n"
+
+
+@app.post("/ask/stream")
+async def ask_stream(request: AskRequest) -> StreamingResponse:
+    """
+    Same as POST /ask but streams progress events (SSE) as each node completes,
+    then sends a final 'done' event with the full response or 'error' on failure.
+    """
+    return StreamingResponse(
+        _stream_ask_events(request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
