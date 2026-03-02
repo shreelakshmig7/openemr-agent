@@ -696,25 +696,24 @@ async def stream_workflow(
                 else:
                     yield {"event": "error", "error": "Workflow completed with no state."}
         except Exception:
+            # No checkpointer (e.g. SqliteSaver not available): use stream_mode="values"
+            # so the last chunk is the full state — get_state() would raise "No checkpointer set".
             graph = _build_graph(checkpointer=None)
+            last_state = None
             async for chunk in graph.astream(
                 initial_state,
                 config=used_config,
-                stream_mode="updates",
+                stream_mode="values",
             ):
-                if not isinstance(chunk, dict):
-                    continue
-                for node_name, update in chunk.items():
-                    summary = _node_summary_for_stream(node_name, update if isinstance(update, dict) else {})
-                    yield {"event": "node", "node": node_name, "summary": summary}
-            snapshot = graph.get_state(used_config)
-            if snapshot and getattr(snapshot, "values", None):
-                result_dict = dict(snapshot.values)
-                if "tool_trace" not in result_dict:
-                    result_dict["tool_trace"] = []
-                if "error" not in result_dict:
-                    result_dict["error"] = None
-                yield {"event": "done", "state": result_dict}
+                if isinstance(chunk, dict):
+                    last_state = dict(chunk)
+                    yield {"event": "node", "node": "_", "summary": "Processing..."}
+            if last_state is not None:
+                if "tool_trace" not in last_state:
+                    last_state["tool_trace"] = []
+                if "error" not in last_state:
+                    last_state["error"] = None
+                yield {"event": "done", "state": last_state}
             else:
                 yield {"event": "error", "error": "Workflow completed with no state."}
     except Exception as e:
