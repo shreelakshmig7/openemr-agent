@@ -1,40 +1,69 @@
+# =============================================================================
 # golden_data.yaml
-# AgentForge — Healthcare RCM AI Agent — Eval Dataset
-# Gauntlet YAML format
-# 59 test cases: 10 happy_path, 16 edge_case, 7 adversarial, 17 pdf_clinical (PR 3),
-#   5 policy_extraction (gs-053 to gs-057), 2 auditor_fix (gs-058 to gs-059)
-# PR 1 additions (gs-019 to gs-026): pdf_extractor, denial_analyzer, drug-class allergy,
+# AgentForge — Healthcare RCM AI Agent — Evaluation Dataset
+# =============================================================================
+#
+# Version:  3.0
+# Author:   Shreelakshmi Gopinatha Rao
+# Created:  2025-01-01
+# Updated:  2026-03-01
+# Format:   Gauntlet YAML (AgentForge eval harness)
+# License:  MIT
+#
+# HIPAA / Privacy Notice
+# ----------------------
+# All patient names, identifiers, dates of birth, and clinical details in this
+# file are ENTIRELY FICTIONAL and generated solely for testing purposes.
+# No real patient data is present. Common placeholder names (John Smith,
+# Mary Johnson, Jane Doe, Maria Gonzalez, etc.) and synthetic IDs (P001,
+# MRN-00123456) are used deliberately to facilitate automated evaluation
+# without creating any privacy risk. This file is safe for public repositories.
+#
+# Dataset Summary
+# ---------------
+# Total cases : 62
+# Categories  :
+#   happy_path         — 10 cases  (gs-001 to gs-010)
+#   edge_case          — 16 cases  (gs-011 to gs-026)
+#   adversarial         —  7 cases  (gs-027 to gs-033)
+#   pdf_clinical        — 17 cases  (gs-036 to gs-052)
+#   policy_extraction   —  5 cases  (gs-053 to gs-057)
+#   auditor_fix         —  2 cases  (gs-058 to gs-059)
+#   identity_resolution —  3 cases  (gs-060 to gs-062)
+#
+# Change Log
+# ----------
+# PR 1 (gs-019 to gs-026): pdf_extractor, denial_analyzer, drug-class allergy,
 #   EHR confidence penalty (Scenario A), Scenario B hard stop.
-# PR 2 additions (gs-027 to gs-033): non-existent patient ID/MRN rejection,
+# PR 2 (gs-027 to gs-033): non-existent patient ID/MRN rejection,
 #   patient-switch PDF preservation (Scenario A), valid patient by ID,
 #   pronoun-only query (no patient name), cross-patient cache collision guard.
-# PR 3 additions (gs-036 to gs-052): full PDF-grounded clinical eval suite using
+# PR 3 (gs-036 to gs-052): full PDF-grounded clinical eval suite using
 #   AgentForge_Test_PriorAuth.pdf (Maria Gonzalez) and
 #   AgentForge_Test_ClinicalNote.pdf (John Smith).
 #   Covers: policy criteria gaps, ICD/CPT alignment, denial risk analysis,
 #   drug diagnosis match, treatment contradictions, review loops, laterality,
 #   anti-hallucination guardrails, state persistence, allergy contraindications,
 #   drug interactions, and out-of-domain adversarial queries.
-# PR 4 additions (gs-053 to gs-057): payer/procedure extraction from query text,
+# PR 4 (gs-053 to gs-057): payer/procedure extraction from query text,
 #   imaging-procedure classification fix (MRI not blocked by PDF gate),
 #   patient-not-in-EHR + PDF policy query (Scenario A variant),
 #   no-payer-mentioned graceful fallback, procedure-as-description extraction.
-# PR 5 additions (gs-058 to gs-059):
+# PR 5 (gs-058 to gs-059):
 #   Auditor virtual-source short-circuit fix (os.path.isfile guard).
-# Identity resolution (gs-060 to gs-062): composite key name+DOB; same-name
-#   different DOB must not merge; local cache used when FHIR unavailable.
-#   Policy criteria extractions with source="policy_search" and FHIR extractions
-#   with source="openemr_fhir" no longer trigger the 3× retry loop — auditor
-#   short-circuits to pass for any source string that is not a real file on disk.
-#   PDF content filter fix — extractions tagged kind="pdf_content" now flow through
-#   all intent filters (ALLERGIES, MEDICATIONS, etc.) so attached chart content
-#   reaches the synthesis LLM for "in the chart" / PDF-referenced queries.
-# New optional fields:
-#   pdf_source_file        — PDF path passed to run_workflow (reproducible: mock_data/ only)
+# PR 6 (gs-060 to gs-062): DOB-based composite key identity resolution;
+#   same-name different DOB must not merge; local cache used when FHIR
+#   unavailable. Policy/FHIR sources no longer trigger 3× retry loop.
+#   PDF content filter fix — kind="pdf_content" flows through all intent
+#   filters so attached chart content reaches the synthesis LLM.
+#
+# Optional Test Fields
+# --------------------
+#   pdf_source_file         — PDF path passed to run_workflow (mock_data/ only)
 #   expected_confidence_max — pass if confidence_score <= this value
-#   expected_escalate      — pass if escalate flag matches (true/false)
-#   expected_denial_risk   — pass if denial_risk.risk_level matches
-# Author: Shreelakshmi Gopinatha Rao
+#   expected_escalate       — pass if escalate flag matches (true/false)
+#   expected_denial_risk    — pass if denial_risk.risk_level matches
+# =============================================================================
 
 test_cases:
 
