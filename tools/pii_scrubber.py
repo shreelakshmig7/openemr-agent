@@ -216,6 +216,7 @@ def scrub_pii(text: str) -> str:
     MRN-style medical licence numbers, and ACC-YYYY-NNNNN account numbers.
 
     Falls back to the regex stub if Presidio is unavailable or raises.
+    Never raises — returns original text or fallback result on any failure.
 
     Args:
         text: Raw input text that may contain PII.
@@ -226,13 +227,16 @@ def scrub_pii(text: str) -> str:
     Raises:
         Never — returns original text unchanged on any failure.
     """
-    if not text or not text.strip():
-        return text
-
-    if not _PRESIDIO_AVAILABLE:
-        return _fallback_scrub(text)
-
     try:
+        if text is None:
+            return ""
+        text = str(text)
+        if not text.strip():
+            return text
+
+        if not _PRESIDIO_AVAILABLE:
+            return _fallback_scrub(text)
+
         analyzer, anonymizer = _get_engines()
         if analyzer is None or anonymizer is None:
             return _fallback_scrub(text)
@@ -254,8 +258,11 @@ def scrub_pii(text: str) -> str:
         return anonymized.text
 
     except Exception as exc:
-        logger.warning("PII scrubber: Presidio error — falling back to regex stub. %s", exc)
-        return _fallback_scrub(text)
+        logger.warning("PII scrubber: error — falling back to regex stub or original. %s", exc)
+        try:
+            return _fallback_scrub(text if isinstance(text, str) else str(text or ""))
+        except Exception:
+            return text if isinstance(text, str) and text else ""
 
 
 def scrub_pii_with_map(text: str) -> Tuple[str, Dict[str, str]]:
@@ -265,6 +272,7 @@ def scrub_pii_with_map(text: str) -> Tuple[str, Dict[str, str]]:
     The replacement map is required for audit trail compliance (HIPAA audit
     logs must be retained 7 years). It records what was replaced and with
     what placeholder, keyed by the original PII string.
+    Never raises — returns (text, {}) on any failure.
 
     Args:
         text: Raw input text that may contain PII.
@@ -278,13 +286,16 @@ def scrub_pii_with_map(text: str) -> Tuple[str, Dict[str, str]]:
     Raises:
         Never — returns (original text, {}) on any failure.
     """
-    if not text or not text.strip():
-        return text, {}
-
-    if not _PRESIDIO_AVAILABLE:
-        return _fallback_scrub(text), {}
-
     try:
+        if text is None:
+            return "", {}
+        text = str(text)
+        if not text.strip():
+            return text, {}
+
+        if not _PRESIDIO_AVAILABLE:
+            return _fallback_scrub(text), {}
+
         analyzer, anonymizer = _get_engines()
         if analyzer is None or anonymizer is None:
             return _fallback_scrub(text), {}
@@ -313,6 +324,9 @@ def scrub_pii_with_map(text: str) -> Tuple[str, Dict[str, str]]:
 
     except Exception as exc:
         logger.warning(
-            "PII scrubber (with_map): Presidio error — falling back to regex stub. %s", exc
+            "PII scrubber (with_map): error — falling back to regex stub or original. %s", exc
         )
-        return _fallback_scrub(text), {}
+        try:
+            return _fallback_scrub(text if isinstance(text, str) else str(text or "")), {}
+        except Exception:
+            return (text if isinstance(text, str) and text else ""), {}

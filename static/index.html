@@ -1201,15 +1201,16 @@
     const traceHtml      = buildTraceHtml(data.tool_trace);
     const denialHtml     = buildDenialBadgeHtml(data.denial_risk);
     const citationHtml   = buildCitationStripHtml(anchors);
-    const privacyHtml   = (data.query_redacted_preview != null && data.query_redacted_preview !== '')
-      ? `<div class="privacy-preview">
-           <details>
-             <summary>🔒 Privacy — Your message was redacted before processing</summary>
-             <div class="privacy-body">${escHtml(data.query_redacted_preview)}</div>
-             <div class="privacy-note">PII (names, SSN, phone, email, MRN, etc.) is replaced with placeholders before being sent to the agent.</div>
-           </details>
-         </div>`
-      : '';
+    const redactedPreview = (data.query_redacted_preview != null && String(data.query_redacted_preview).trim() !== '')
+      ? data.query_redacted_preview
+      : 'Redaction preview not available for this message.';
+    const privacyHtml = `<div class="privacy-preview">
+      <details>
+        <summary>🔒 Privacy — Your message was redacted before processing</summary>
+        <div class="privacy-body">${escHtml(redactedPreview)}</div>
+        <div class="privacy-note">PII (names, SSN, phone, email, MRN, etc.) is replaced with placeholders before being sent to the agent.</div>
+      </details>
+    </div>`;
 
     div.innerHTML = `
       <div class="bubble">${escHtml(data.answer)}</div>

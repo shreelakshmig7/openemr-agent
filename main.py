@@ -397,12 +397,15 @@ def ask(request: AskRequest) -> AskResponse:
         pass
 
     # Scrubbed version of the user's question (what was sent to the agent after PII redaction).
-    # Included so the UI can show "Privacy: your message was redacted" and verify PII scrubber.
-    query_redacted_preview = None
+    # Always a non-null string so the UI can show the Privacy block (redacted text or fallback message).
+    _REDACT_UNAVAILABLE = "[Redaction unavailable for this message.]"
     try:
         query_redacted_preview = scrub_pii(request.question)
-    except Exception:
-        pass
+        if query_redacted_preview is None or (isinstance(query_redacted_preview, str) and not query_redacted_preview.strip()):
+            query_redacted_preview = _REDACT_UNAVAILABLE
+    except Exception as e:
+        logging.warning("PII scrubber failed, query_redacted_preview omitted: %s", e, exc_info=True)
+        query_redacted_preview = _REDACT_UNAVAILABLE
 
     return AskResponse(
         answer=answer,
@@ -415,7 +418,7 @@ def ask(request: AskRequest) -> AskResponse:
         tool_trace=result.get("tool_trace", []),
         denial_risk=result.get("denial_risk") or {},
         citation_anchors=result.get("citation_anchors") or [],
-        query_redacted_preview=query_redacted_preview,
+        query_redacted_preview=query_redacted_preview or _REDACT_UNAVAILABLE,
     )
 
 
@@ -430,11 +433,14 @@ def _build_ask_response_dict(result: dict, session_id: str, request_question: st
         or denial_risk_level in ("HIGH", "CRITICAL")
     )
     disclaimer = CLINICAL_SAFETY_RULES["disclaimer"]
-    query_redacted_preview = None
+    _REDACT_UNAVAILABLE = "[Redaction unavailable for this message.]"
     try:
         query_redacted_preview = scrub_pii(request_question)
-    except Exception:
-        pass
+        if query_redacted_preview is None or (isinstance(query_redacted_preview, str) and not query_redacted_preview.strip()):
+            query_redacted_preview = _REDACT_UNAVAILABLE
+    except Exception as e:
+        logging.warning("PII scrubber failed, query_redacted_preview omitted: %s", e, exc_info=True)
+        query_redacted_preview = _REDACT_UNAVAILABLE
     return {
         "answer": answer,
         "session_id": session_id,
@@ -446,7 +452,7 @@ def _build_ask_response_dict(result: dict, session_id: str, request_question: st
         "tool_trace": result.get("tool_trace", []),
         "denial_risk": result.get("denial_risk") or {},
         "citation_anchors": result.get("citation_anchors") or [],
-        "query_redacted_preview": query_redacted_preview,
+        "query_redacted_preview": query_redacted_preview or _REDACT_UNAVAILABLE,
     }
 
 
