@@ -67,9 +67,6 @@ criteria.**
   Payer Policy     Insurance medical necessity Pinecone vector DB
   Databases        criteria (200+ page PDFs)   (chunked + indexed)
 
-  ICD-10 / CPT     Validate diagnosis and      Custom Medical Fact-Checker
-  Registry         procedure code accuracy     tool
-
   Mock Data        Development and automated   Local JSON + PDF fixtures
                    eval testing                
   ---------------- --------------------------- ---------------------------
@@ -173,52 +170,115 @@ Extractor Node, Auditor Node, Review Loop, and Clarification Node.**
 
 **Multi-Agent State Machine Design**
 
-  ---------------- ---------------------------- -------------------------
-  **Node**         **Role**                     **Can Trigger**
+  -------------------- ----------------------------------------- ----------------------------
+  **Node**             **Role**                                   **Can Trigger**
 
-  Extractor Node   Reads clinical PDF, extracts Auditor Node
-                   relevant evidence with       
-                   citations                    
+  Router Node          First node — classifies every query into   Orchestrator Node (clinical)
+                       one of 6 intents (MEDICATIONS, ALLERGIES,  or Output Node (OUT_OF_SCOPE)
+                       INTERACTIONS, SAFETY_CHECK,                
+                       GENERAL_CLINICAL, OUT_OF_SCOPE). Refuses   
+                       non-healthcare queries before any patient  
+                       data is touched.                           
 
-  Auditor Node     Independently validates      Review Loop or Output
-                   every citation against       Node
-                   source document              
+  Orchestrator Node    Runs a single Haiku call to produce a      Extractor Node
+                       tool_plan, extract patient name/DOB, and   
+                       classify data_source_required. HITL        
+                       pre-check: detects "yes/sync" and routes   
+                       to Sync Execution directly.               
 
-  Review Loop      Sends work back to Extractor Extractor Node (max 3
-                   with specific missing        iterations)
-                   evidence instructions        
+  Extractor Node       Executes tools per tool_plan: patient      Comparison Node (PDF) or
+                       lookup, medications, allergies, drug        Auditor Node (no PDF)
+                       interactions, PDF extraction, policy        
+                       search, denial analysis, allergy conflict.  
+                       PII-scrubbed before every LLM call.        
 
-  Clarification    Pauses workflow when text is Resumes Extractor after
-  Node             ambiguous, requests human    input received
-                   input                        
+  Comparison Node      Runs after PDF extraction. Deduplicates    Output Node (sets
+                       newly staged evidence against prior SYNCED  pending_sync_confirmation
+                       rows. Sets HITL sync confirmation flag so   = True, pauses for user
+                       user approves before data reaches OpenEMR. approval)
 
-  Output Node      Formats final verified       End or Human Review queue
-                   response with citations and  
-                   confidence score             
-  ---------------- ---------------------------- -------------------------
+  Auditor Node         Independently validates every citation     Review Loop (missing) or
+                       against source data. Synthesizes the        Output Node (pass/partial)
+                       verified final response.                   
+
+  Review Loop          Sends work back to Extractor with          Extractor Node (max 3
+                       specific missing evidence instructions.     iterations)
+
+  Clarification Node   Pauses workflow when text is ambiguous     Resumes Orchestrator after
+                       (missing patient name, missing payer, etc.) input received
+                       Requests targeted human input.             
+
+  Sync Execution Node  HITL confirmation path. Verifies portal    Output Node
+                       is reachable, calls run_sync() to POST      
+                       evidence to OpenEMR FHIR. SQLite            
+                       evidence_staging is the fallback audit      
+                       trail when FHIR writes are unavailable.    
+
+  Output Node          Formats the final verified response with   End or Human Review queue
+                       citations, confidence score, and            
+                       disclaimer. Enforces data-source gate.     
+  -------------------- ----------------------------------------- ----------------------------
 
 **LangGraph State Schema**
 
-The state persists across all nodes and includes:
+The state persists across all nodes and is organised into three memory layers:
 
+**Layer 1 — Conversation History**
+
+-   messages: full conversation history using LangGraph add_messages
+    reducer; enables pronoun resolution ("his", "her") across turns
+    without re-running patient extraction
+
+**Layer 2 — Session Cache (per-session, persists across turns)**
+
+-   extracted_patient: cached patient dict; Orchestrator skips lookup
+    when populated
+-   extracted_pdf_pages / extracted_pdf_hash: page-keyed PDF text
+    cached by MD5 hash; prevents re-extracting the same file
+-   payer_policy_cache: policy search results keyed by payer_id
+-   denial_risk_cache: denial analysis results keyed by
+    "payer_id:cpt_code"
+-   tool_call_history: ordered log of every tool called this session
+
+**Layer 3 — SQLite Checkpointer**
+
+-   session_id / thread_id: ties graph invocations to a single SQLite
+    checkpoint row; enables mid-document resume on crash
+
+**Core workflow fields**
+
+-   query_intent: set by Router Node — one of MEDICATIONS | ALLERGIES |
+    INTERACTIONS | SAFETY_CHECK | GENERAL_CLINICAL | OUT_OF_SCOPE
+-   tool_plan: ordered list of tool names set by Orchestrator; Extractor
+    runs only these tools
+-   data_source_required: EHR / PDF / RESIDENT_NOTE / IMAGING / NONE —
+    gate checked by Output Node before synthesising response
+-   payer_id / procedure_code: extracted by Orchestrator for
+    policy_search
 -   documents_processed: list of pages and sections completed so far
-
--   extractions: list of evidence items each with direct quote and
+-   extractions: list of evidence items, each with direct quote and
     source location
-
 -   audit_results: Auditor Node validation results per citation
-
--   pending_user_input: boolean flag --- pauses the entire workflow
+-   denial_risk: result of denial_analyzer — risk_level, patterns,
+    score (0.0–1.0)
+-   pending_user_input: boolean flag — pauses the entire workflow
     without losing any completed work
-
 -   clarification_needed: the specific question for the human when
     ambiguity is detected
-
 -   iteration_count: prevents infinite review loops, capped at 3
     re-extractions
-
 -   confidence_score: final score; triggers human-in-loop queue if below
     90%
+-   is_partial: True when iteration ceiling was hit; partial results
+    returned with gaps flagged
+
+**HITL Sync fields (set by Comparison Node)**
+
+-   pending_sync_confirmation: True = workflow paused; user must approve
+    before evidence is posted to OpenEMR
+-   sync_summary: {"new": [...], "existing": [...], "total_raw": N}
+-   staged_patient_fhir_id / staged_session_id: scopes the sync to the
+    correct patient and evidence batch
 
 *The pending_user_input flag is architecturally critical. Without it,
 hitting an ambiguity on page 23 of a 50-page chart discards all previous
@@ -279,20 +339,35 @@ Presidio for PII scrubbing.**
   pdf_extractor(file)             unstructured.io    Extracts text and tables from messy
                                                      scanned clinical PDFs
 
-  policy_search(query)            Pinecone +         Semantic search over indexed payer
-                                  embeddings         policy PDFs
+  policy_search(payer_id,         Pinecone +         Semantic search over indexed payer
+  procedure_code)                 Voyage AI          policy PDFs; keyword mock when
+                                                     Pinecone is not configured
 
-  fhir_patient_data(patient_id)   OpenEMR FHIR R4    Retrieves structured diagnoses,
-                                                     procedures, encounters
+  get_patient_info(name, dob)     OpenEMR FHIR R4    Retrieves patient demographics and
+                                  + mock fallback    allergies; FHIR primary, mock_data
+                                                     secondary
 
-  validate_codes(icd10, cpt)      Custom ICD-10/CPT  Verifies diagnosis codes support
-                                  registry           the requested procedure
+  get_medications(patient_id)     OpenEMR FHIR R4    Retrieves active medications via
+                                  + mock fallback    MedicationRequest; FHIR primary,
+                                                     mock_data secondary
 
-  citation_verifier(claim, doc)   Custom tool        Confirms claimed quote exists
-                                                     verbatim in source document
+  get_allergies(patient_id)       OpenEMR FHIR R4    Retrieves allergy list via
+                                  + mock fallback    AllergyIntolerance; FHIR primary,
+                                                     mock_data secondary
 
-  pii_scrubber(text)              Microsoft Presidio Scrubs Names/SSNs/DOBs locally
-                                                     before text reaches cloud LLM
+  check_allergy_conflict          Custom tool        Flags drug–allergy conflicts by
+  (drug, allergies)                                  name and drug class
+
+  denial_analyzer(extractions)    Custom logic       Scores clinical extractions for
+                                                     denial risk patterns; no external
+                                                     API required
+
+  citation_verifier(claim, doc)   Auditor Node       Confirms every claimed quote exists
+                                                     verbatim in the source document
+
+  pii_scrubber(text)              Microsoft Presidio Scrubs Names/SSNs/DOBs/MRNs locally
+                                                     before text reaches cloud LLM;
+                                                     graceful regex fallback
   ------------------------------- ------------------ -----------------------------------
 
 **2.4 Observability Strategy**
@@ -773,9 +848,6 @@ A documented runbook is maintained in the GitHub repository covering:
 
   PII Protection  Microsoft Presidio    Local scrubbing before any cloud
                                         LLM call
-
-  Code Validation Custom ICD-10/CPT     Validates diagnosis-procedure code
-                  tool                  alignment
 
   Observability   LangSmith             Faithfulness, relevancy, citation
                                         accuracy metrics
