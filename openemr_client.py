@@ -892,6 +892,69 @@ class OpenEMRClient:
 
     # ── Standard REST API (non-FHIR) ────────────────────────────────────────
 
+    async def get_rest_allergies(self, patient_uuid: str) -> list[str]:
+        """
+        Fetch allergies via the standard OpenEMR REST API.
+        →  ``GET /apis/default/api/patient/{uuid}/allergy``
+
+        Reads ``lists.title`` directly from the database, bypassing the FHIR
+        translation layer entirely.  Unlike the FHIR ``AllergyIntolerance``
+        endpoint — which emits ``code.text = "Unknown"`` for allergies that
+        lack a SNOMED/RxNorm code — this endpoint always returns the exact
+        name entered in the portal (e.g. ``"Penicillin"``, ``"Sulfa"``).
+
+        This should be the *primary* source for allergy lookups.  The FHIR
+        endpoint (``get_fhir_allergies``) acts as a secondary fallback for
+        allergies that were created via the FHIR API and may not appear in
+        the ``lists`` table.
+
+        Args:
+            patient_uuid: FHIR / internal UUID of the target patient.
+
+        Returns:
+            List of allergen name strings, e.g. ``["Penicillin", "Sulfa"]``.
+            Empty list on error or no allergies on record.
+
+        Raises:
+            RuntimeError:     if the client is not connected.
+            OpenEMRAPIError:  if the server returns a non-2xx response.
+        """
+        if self._http is None:
+            raise RuntimeError(
+                "OpenEMRClient is not connected. "
+                "Use 'async with OpenEMRClient() as client:' or call connect() first."
+            )
+
+        _GENERIC = {"unknown", "unspecified", "other", "none", ""}
+        url = f"{self._api_base}/patient/{patient_uuid}/allergy"
+        token = await self._ensure_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        try:
+            resp = await self._http.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise OpenEMRAPIError(0, str(exc)) from exc
+
+        if resp.status_code not in range(200, 300):
+            raise OpenEMRAPIError(resp.status_code, resp.text)
+
+        body: dict[str, Any] = resp.json() if resp.content else {}
+        allergens: list[str] = []
+        for item in body.get("data", []):
+            title = (item.get("title") or "").strip()
+            if title and title.lower() not in _GENERIC:
+                allergens.append(title)
+
+        logger.debug(
+            "OpenEMRClient.get_rest_allergies: %d allerg%s for %s.",
+            len(allergens), "y" if len(allergens) == 1 else "ies", patient_uuid,
+        )
+        return allergens
+
     async def post_encounter(
         self,
         patient_uuid: str,

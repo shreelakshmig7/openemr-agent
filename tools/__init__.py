@@ -22,7 +22,44 @@ import logging
 import os
 import re
 from datetime import date
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
+
+
+def _normalize_dob(dob: Optional[str]) -> Optional[str]:
+    """
+    Normalize a date string to ISO YYYY-MM-DD for identity matching.
+    Accepts YYYY-MM-DD, MM/DD/YYYY, MM-DD-YYYY. Returns None if invalid or empty.
+    """
+    if not dob or not str(dob).strip():
+        return None
+    s = str(dob).strip()
+    # Already ISO
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        try:
+            date.fromisoformat(s)
+            return s
+        except ValueError:
+            return None
+    # MM/DD/YYYY or M/D/YYYY
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+    if m:
+        try:
+            mth, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mth <= 12 and 1 <= d <= 31 and 1900 <= y <= 2100:
+                return f"{y:04d}-{mth:02d}-{d:02d}"
+        except (ValueError, TypeError):
+            pass
+        return None
+    # MM-DD-YYYY
+    m = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", s)
+    if m:
+        try:
+            mth, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mth <= 12 and 1 <= d <= 31 and 1900 <= y <= 2100:
+                return f"{y:04d}-{mth:02d}-{d:02d}"
+        except (ValueError, TypeError):
+            pass
+    return None
 
 from langsmith import traceable
 
@@ -143,10 +180,10 @@ def _fhir_patient_to_local(fhir_patient: dict) -> dict:
                 len(allergies), "y" if len(allergies) == 1 else "ies", full_name,
             )
     elif fhir_id:
-        allergies = _filter_allergies(_run_async_in_thread(_fhir_allergies_async(fhir_id)))
+        allergies = _filter_allergies(_run_async_in_thread(_live_allergies_async(fhir_id)))
         if allergies:
             logger.info(
-                "tools._fhir_patient_to_local: fetched %d allerg%s for %s from FHIR (fallback)",
+                "tools._fhir_patient_to_local: fetched %d allerg%s for %s via live EHR",
                 len(allergies), "y" if len(allergies) == 1 else "ies", full_name,
             )
     else:
@@ -165,51 +202,83 @@ def _fhir_patient_to_local(fhir_patient: dict) -> dict:
     }
 
 
-async def _fhir_name_lookup_async(given: str, family: str) -> Optional[dict]:
+async def _fhir_name_lookup_async(
+    given: str, family: str, dob_iso: Optional[str] = None
+) -> Optional[dict]:
     """
-    Coroutine: search OpenEMR FHIR for a patient by name.
+    Coroutine: search OpenEMR FHIR for a patient by name, optionally requiring DOB match.
 
-    Tries (family + given) first; if that returns nothing, retries with
-    family only.  Returns the first matching FHIR Patient resource dict
-    (with a ``_prefetched_allergies`` key added in-band), or None if no
-    match or if OpenEMR is unreachable.
+    Identity resolution: when dob_iso is provided, only a patient whose birthDate
+    matches exactly is considered a match. If name matches but DOB differs, returns
+    None (caller treats as new patient). When dob_iso is None, preserves legacy
+    behavior: first name match is returned.
 
-    Allergies are fetched inside the same ``OpenEMRClient`` session so we
-    only pay the OAuth2 + registration overhead once per patient lookup.
-    The result is stored under ``resource["_prefetched_allergies"]`` so
-    ``_fhir_patient_to_local`` can use it without opening a second client.
+    Tries (family + given [+ birthdate]) first; if that returns nothing, retries
+    with family only (and birthdate filter if provided). Returns the matching
+    FHIR Patient resource dict (with _prefetched_allergies), or None if no match
+    or if OpenEMR is unreachable.
     """
-    # Import here to avoid circular import at module load time
     from openemr_client import OpenEMRClient
 
-    search_attempts = []
+    search_attempts: List[dict] = []
     if family and given:
-        search_attempts.append({"family": family, "given": given})
+        params: dict = {"family": family, "given": given}
+        if dob_iso:
+            params["birthdate"] = dob_iso
+        search_attempts.append(params)
     if family:
-        search_attempts.append({"family": family})
+        params = {"family": family}
+        if dob_iso:
+            params["birthdate"] = dob_iso
+        search_attempts.append(params)
 
     try:
         async with OpenEMRClient() as client:
             for params in search_attempts:
                 bundle = await client.get_patients(**params)
                 entries = bundle.get("entry", [])
-                if entries:
+                if not entries:
+                    continue
+                # When DOB was not in search params, filter by DOB if we have it (FHIR may not support birthdate in all backends).
+                if dob_iso:
+                    matched = None
+                    for entry in entries:
+                        res = entry.get("resource", {})
+                        res_dob = (res.get("birthDate") or "").strip()
+                        if res_dob == dob_iso:
+                            matched = res
+                            break
+                    if not matched:
+                        logger.info(
+                            "tools: name matched but no FHIR patient with DOB %s — treating as new patient.",
+                            dob_iso,
+                        )
+                        return None
+                    resource = matched
+                else:
                     resource = entries[0]["resource"]
-                    fhir_id = resource.get("id", "")
-                    if fhir_id:
-                        try:
-                            resource["_prefetched_allergies"] = await client.get_fhir_allergies(fhir_id)
-                        except Exception as allergy_exc:
-                            logger.warning("tools: allergy prefetch failed for %s — %s", fhir_id, allergy_exc)
-                            resource["_prefetched_allergies"] = []
-                    return resource
+                fhir_id = resource.get("id", "")
+                if fhir_id:
+                    try:
+                        # REST API first — reads lists.title directly, always
+                        # reflects portal-entered allergies accurately.
+                        rest = await client.get_rest_allergies(fhir_id)
+                        resource["_prefetched_allergies"] = (
+                            rest if rest else await client.get_fhir_allergies(fhir_id)
+                        )
+                    except Exception as allergy_exc:
+                        logger.warning("tools: allergy prefetch failed for %s — %s", fhir_id, allergy_exc)
+                        resource["_prefetched_allergies"] = []
+                return resource
     except Exception as exc:
         logger.warning("tools: FHIR patient lookup failed — %s", exc)
 
     return None
 
 
-def _fhir_patient_lookup(given: str, family: str) -> Optional[dict]:
+def _fhir_patient_lookup(
+    given: str, family: str, dob_iso: Optional[str] = None
+) -> Optional[dict]:
     """
     Synchronous bridge: runs ``_fhir_name_lookup_async`` in an isolated
     thread so it is safe to call from either a synchronous LangGraph node
@@ -218,7 +287,7 @@ def _fhir_patient_lookup(given: str, family: str) -> Optional[dict]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
             asyncio.run,
-            _fhir_name_lookup_async(given, family),
+            _fhir_name_lookup_async(given, family, dob_iso),
         )
         try:
             return future.result(timeout=15)
@@ -231,32 +300,27 @@ def _fhir_patient_lookup(given: str, family: str) -> Optional[dict]:
 
 
 @traceable
-def get_patient_info(name_or_id: str) -> dict:
+def get_patient_info(name_or_id: str, dob: Optional[str] = None) -> dict:
     """
     Look up a patient using a three-tier priority hierarchy.
+
+    Identity resolution: when dob is provided (e.g. from PDF or query), a patient
+    is only considered a match if BOTH name and DOB match exactly. If name
+    matches but DOB differs, returns success=False so the caller treats the
+    record as a new patient (no EHR merge).
 
     Priority
     --------
     1. PRIMARY   — OpenEMR FHIR R4 API (live EHR record).
-                   Always attempted first for name queries so the agent
-                   works with the most current clinical data.
     2. SECONDARY — Local mock_data/patients.json.
-                   Used when FHIR is unreachable or returns no results.
-    3. FINAL     — Both miss → structured "not found" response with a
-                   suggestion to create the patient record.
+    3. FINAL     — Both miss → "not found" + suggestion.
 
     Special case: P-prefixed IDs (e.g. "P001") skip FHIR and go directly
-    to the local cache, as these are local demo identifiers.
+    to the local cache; DOB is ignored for P-ID lookups.
 
     Returns
     -------
-    dict with keys:
-        success     bool   — True when a patient was found.
-        patient     dict   — Patient record (None on failure).
-        data_source str    — "Live EHR (OpenEMR FHIR)" | "Local Cache" | None
-        source      str    — internal tag: "openemr_fhir" | "local_cache"
-        error       str    — Human-readable error (only when success=False).
-        suggestion  str    — Next-step hint (only when success=False).
+    dict with keys: success, patient, data_source, source, error, suggestion.
     """
     try:
         if not name_or_id or not name_or_id.strip():
@@ -269,6 +333,7 @@ def get_patient_info(name_or_id: str) -> dict:
             }
 
         query = name_or_id.strip()
+        dob_iso = _normalize_dob(dob)
 
         # ── Special case: local P-ID lookup (P001 … P999) ────────────────
         if re.match(r'^[Pp]\d+$', query):
@@ -291,10 +356,13 @@ def get_patient_info(name_or_id: str) -> dict:
                 "suggestion":  "Verify the ID, or search by full name.",
             }
 
-        # ── Step 1 (PRIMARY): OpenEMR FHIR API ───────────────────────────
-        logger.info("tools: querying OpenEMR FHIR API for '%s' (primary).", query)
+        # ── Step 1 (PRIMARY): OpenEMR FHIR API (composite key when dob_iso set) ─
+        logger.info(
+            "tools: querying OpenEMR FHIR API for '%s'%s (primary).",
+            query, f" (DOB {dob_iso})" if dob_iso else "",
+        )
         given, family = _parse_name_for_fhir(query)
-        fhir_resource = _fhir_patient_lookup(given, family)
+        fhir_resource = _fhir_patient_lookup(given, family, dob_iso)
 
         if fhir_resource:
             patient = _fhir_patient_to_local(fhir_resource)
@@ -314,21 +382,26 @@ def get_patient_info(name_or_id: str) -> dict:
             query,
         )
 
-        # ── Step 2 (SECONDARY): Local cache ──────────────────────────────
+        # ── Step 2 (SECONDARY): Local cache (composite key when dob_iso set) ───
         query_lower = query.lower()
         for patient in PATIENTS_DB:
-            if query_lower in patient["name"].lower():
-                patient.setdefault("source", "local_cache")
-                logger.info(
-                    "tools: '%s' resolved from Local Cache (FHIR returned no results).",
-                    query,
-                )
-                return {
-                    "success":     True,
-                    "patient":     patient,
-                    "data_source": "Local Cache",
-                    "source":      "local_cache",
-                }
+            if query_lower not in (patient.get("name") or "").lower():
+                continue
+            if dob_iso:
+                p_dob = _normalize_dob(patient.get("dob"))
+                if p_dob != dob_iso:
+                    continue  # Name matches but DOB differs — treat as new patient, skip this record
+            patient.setdefault("source", "local_cache")
+            logger.info(
+                "tools: '%s' resolved from Local Cache (FHIR returned no results).",
+                query,
+            )
+            return {
+                "success":     True,
+                "patient":     patient,
+                "data_source": "Local Cache",
+                "source":      "local_cache",
+            }
 
         # ── Step 3 (FINAL): Both sources exhausted ────────────────────────
         logger.warning(
@@ -432,6 +505,42 @@ async def _fhir_allergies_async(patient_uuid: str) -> list[str]:
         return await client.get_fhir_allergies(patient_uuid)
 
 
+async def _live_allergies_async(patient_uuid: str) -> list[str]:
+    """
+    Fetch allergies using REST API first, falling back to FHIR.
+
+    Priority:
+      1. Standard REST API  (GET /api/patient/{uuid}/allergy)
+         Reads lists.title directly — always reflects portal updates.
+      2. FHIR AllergyIntolerance  (GET /fhir/AllergyIntolerance?patient={uuid})
+         Fallback for allergies created via the FHIR API path.
+
+    Never falls back to mock_data — callers must handle an empty list
+    themselves rather than serving stale static data.
+    """
+    from openemr_client import OpenEMRClient
+    async with OpenEMRClient() as client:
+        try:
+            rest_allergies = await client.get_rest_allergies(patient_uuid)
+            if rest_allergies:
+                logger.info(
+                    "tools._live_allergies_async: REST returned %d allerg%s for %s.",
+                    len(rest_allergies), "y" if len(rest_allergies) == 1 else "ies",
+                    patient_uuid,
+                )
+                return rest_allergies
+        except Exception as rest_exc:
+            logger.warning(
+                "tools._live_allergies_async: REST API failed for %s — %s. Trying FHIR.",
+                patient_uuid, rest_exc,
+            )
+        logger.info(
+            "tools._live_allergies_async: REST returned 0 for %s — trying FHIR.",
+            patient_uuid,
+        )
+        return await client.get_fhir_allergies(patient_uuid)
+
+
 def _run_async_in_thread(coro) -> any:
     """Run an async coroutine safely from a sync context via a thread pool."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -524,56 +633,45 @@ def get_allergies(patient_id: str) -> dict:
     Returns dict with keys: success, patient_id, allergies (list[str]), source.
     Always succeeds — returns empty list when no allergies are found.
     """
-    local_id: Optional[str] = None
-
     _GENERIC_PLACEHOLDERS = {"unknown", "unspecified", "other", "none", ""}
 
     if _is_fhir_uuid(patient_id):
-        logger.info("tools.get_allergies: fetching FHIR AllergyIntolerance for %s", patient_id)
-        raw_fhir_allergies = _run_async_in_thread(_fhir_allergies_async(patient_id))
-        # Filter out generic placeholders that OpenEMR may emit for uncoded allergies.
-        fhir_allergies = [
-            a for a in (raw_fhir_allergies or [])
+        # ── Live EHR path (REST-first, then FHIR) ────────────────────────
+        # Never fall through to mock_data for FHIR UUID patients — mock_data
+        # is a static snapshot and won't reflect portal updates.
+        logger.info("tools.get_allergies: fetching live allergies for %s", patient_id)
+        raw = _run_async_in_thread(_live_allergies_async(patient_id))
+        live_allergies = [
+            a for a in (raw or [])
             if a and a.strip().lower() not in _GENERIC_PLACEHOLDERS
         ]
-        if fhir_allergies:
-            # FHIR returned at least one named allergy — use it as authoritative.
+        logger.info(
+            "tools.get_allergies: live EHR returned %d allerg%s for %s",
+            len(live_allergies), "y" if len(live_allergies) == 1 else "ies", patient_id,
+        )
+        return {
+            "success":    True,
+            "patient_id": patient_id,
+            "allergies":  live_allergies,
+            "source":     "Live EHR (OpenEMR)",
+        }
+
+    # ── Local P-ID path — offline/demo only ──────────────────────────────
+    # Only reached for local demo IDs (P001 … P999), never for live patients.
+    local_id = patient_id
+    for p in PATIENTS_DB:
+        if p.get("id", "").upper() == local_id.upper():
+            local_allergies = p.get("allergies", [])
             logger.info(
-                "tools.get_allergies: FHIR returned %d allerg%s for %s",
-                len(fhir_allergies), "y" if len(fhir_allergies) == 1 else "ies", patient_id,
+                "tools.get_allergies: mock_data for local ID %s → %s",
+                local_id, local_allergies,
             )
             return {
                 "success":    True,
-                "patient_id": patient_id,
-                "allergies":  fhir_allergies,
-                "source":     "Live EHR (OpenEMR FHIR)",
+                "patient_id": local_id,
+                "allergies":  local_allergies,
+                "source":     "Local Cache (mock_data)",
             }
-        # FHIR returned empty list, all-generic names, or failed — fall back to mock_data.
-        logger.info(
-            "tools.get_allergies: FHIR returned 0 usable allergies for %s (raw=%s) — falling back to mock_data",
-            patient_id, raw_fhir_allergies,
-        )
-        local_id = _resolve_local_id_from_uuid(patient_id)
-    else:
-        local_id = patient_id
-
-    # ── Fallback: mock_data/patients.json ─────────────────────────────────
-    # Used when FHIR AllergyIntolerance returns nothing (common in demo builds
-    # where the data is seeded via SQL but FHIR layer doesn't expose it).
-    if local_id:
-        for p in PATIENTS_DB:
-            if p.get("id", "").upper() == local_id.upper():
-                local_allergies = p.get("allergies", [])
-                logger.info(
-                    "tools.get_allergies: mock_data fallback for %s → %s",
-                    local_id, local_allergies,
-                )
-                return {
-                    "success":    True,
-                    "patient_id": local_id,
-                    "allergies":  local_allergies,
-                    "source":     "Local Cache (mock_data)",
-                }
 
     return {
         "success":    True,
