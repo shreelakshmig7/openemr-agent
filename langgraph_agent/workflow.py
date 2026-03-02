@@ -685,6 +685,13 @@ async def stream_workflow(
                     for node_name, update in chunk.items():
                         summary = _node_summary_for_stream(node_name, update if isinstance(update, dict) else {})
                         yield {"event": "node", "node": node_name, "summary": summary}
+                # Flush LangSmith trace before reading final state so the trace
+                # is marked complete in the dashboard before the done event arrives.
+                try:
+                    from langchain_core.tracers.langchain import wait_for_all_tracers
+                    wait_for_all_tracers()
+                except Exception:
+                    pass
                 snapshot = graph.get_state(used_config)
                 if snapshot and getattr(snapshot, "values", None):
                     result_dict = dict(snapshot.values)
@@ -708,6 +715,11 @@ async def stream_workflow(
                 if isinstance(chunk, dict):
                     last_state = dict(chunk)
                     yield {"event": "node", "node": "_", "summary": "Processing..."}
+            try:
+                from langchain_core.tracers.langchain import wait_for_all_tracers
+                wait_for_all_tracers()
+            except Exception:
+                pass
             if last_state is not None:
                 if "tool_trace" not in last_state:
                     last_state["tool_trace"] = []
