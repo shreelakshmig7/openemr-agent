@@ -25,11 +25,11 @@ Login to OpenEMR and navigate to the **AgentForge** tab to use the AI agent. The
 
 ## Open Source Contributions
 
-As part of this project, we have released a public RCM evaluation dataset containing 59 validated clinical test cases. This dataset is now hosted within our OpenEMR fork at:
+As part of this project, we have released a public RCM evaluation dataset
+containing 59 validated clinical test cases. This dataset is now hosted
+within our OpenEMR fork at:
 
-**https://github.com/shreelakshmig7/openemr/tree/master/contrib/benchmarks/rcm_agent_evals**
-
-The benchmark covers four clinical categories: Clinical Extraction, Denial Logic (Aetna CPB #0876), Adversarial/Safety, and Edge Cases. All patient names and identifiers are entirely fictional — safe for public use under HIPAA guidelines. See [`contrib/benchmarks/rcm_agent_evals/README.md`](contrib/benchmarks/rcm_agent_evals/README.md) for usage instructions.
+https://github.com/shreelakshmig7/openemr/tree/master/contrib/benchmarks/rcm_agent_evals
 
 ## Runbook
 
